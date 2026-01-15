@@ -1,0 +1,30 @@
+version: '3.8'
+
+services:
+  totalrecall:
+    build:
+      context: .
+      dockerfile: Containerfile
+    container_name: totalrecall
+    restart: unless-stopped
+    volumes:
+      - ./config:/app/config:ro
+      - ./data:/app/data
+      - ./logs:/app/logs
+    environment:
+      - RUST_LOG=info
+      - RUST_LOG_JSON=true
+      - LOG_FILE=/app/logs/totalrecall.log
+    command: ["daemon"]
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+    healthcheck:
+      test: ["CMD", "pgrep", "-f", "totalrecall daemon"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+

@@ -1,0 +1,29 @@
+[package]
+name = "media-sync-sources"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+media-sync-models = { path = "../media-sync-models" }
+chromiumoxide = { workspace = true }
+dirs = { workspace = true }
+futures = "0.3"
+which = { workspace = true }
+reqwest = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+csv = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+async-trait = "0.1"
+urlencoding = "2.1"
+simkl = "0.0.1"
+media-sync-config = { path = "../media-sync-config" }
+browser-debug = { path = "../browser-debug" }
+
+[dev-dependencies]
+tempfile = "3"
+

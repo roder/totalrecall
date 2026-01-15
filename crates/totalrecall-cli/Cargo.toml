@@ -1,0 +1,30 @@
+[package]
+name = "totalrecall-cli"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "totalrecall"
+path = "src/main.rs"
+
+[dependencies]
+clap = { workspace = true }
+color-eyre = { workspace = true }
+media-sync-core = { path = "../media-sync-core" }
+media-sync-config = { path = "../media-sync-config" }
+media-sync-models = { path = "../media-sync-models" }
+media-sync-sources = { path = "../media-sync-sources" }
+indicatif = { workspace = true }
+tokio = { workspace = true }
+tokio-cron-scheduler = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+rpassword = { workspace = true }
+owo-colors = "4.0"
+serde_json = { workspace = true }
+dirs = { workspace = true }
+dialoguer = "0.11"
+comfy-table = "7.1"
+

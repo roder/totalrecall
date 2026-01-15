@@ -1,0 +1,57 @@
+[workspace]
+members = [
+    "crates/totalrecall-cli",
+    "crates/media-sync-core",
+    "crates/media-sync-models",
+    "crates/media-sync-sources",
+    "crates/media-sync-config",
+    "crates/browser-debug",
+]
+resolver = "2"
+
+[workspace.dependencies]
+# CLI
+clap = { version = "4", features = ["derive"] }
+color-eyre = "0.6"
+
+# Progress bars and UI
+indicatif = "0.17"
+
+# Async
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs"] }
+
+# Scheduling (internal cron scheduler)
+tokio-cron-scheduler = "0.9"
+
+# Browser automation (fetcher feature enabled for fallback when system Chromium not available)
+chromiumoxide = { version = "0.8", features = ["_fetcher-rustls-tokio"] }
+which = "5"
+
+# HTTP client
+reqwest = { version = "0.11", features = ["json", "rustls-tls"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# CSV parsing
+csv = "1"
+
+# Error handling
+thiserror = "1"
+anyhow = "1"
+
+# Logging (structured JSON for Docker)
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json", "chrono"] }
+
+# Config (TOML only - no YAML)
+toml = "0.8"
+dirs = "5"
+
+# Interactive prompts
+rpassword = "7"
+
