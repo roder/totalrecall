@@ -358,7 +358,9 @@ This file is automatically managed by TotalRecall. You should not edit it manual
 
 All credentials are set/updated by `totalrecall config` commands and the sync process.
 
-## How TotalRecall Works
+## Sync Pipeline Details
+
+This section provides technical details about how TotalRecall's sync pipeline works, including caching strategies and implementation specifics. For a high-level overview, see [How Sync Works](#how-sync-works) above.
 
 TotalRecall uses a three-phase pipeline: **Collect**, **Resolve**, and **Distribute**. Each phase has its own caching strategy.
 
