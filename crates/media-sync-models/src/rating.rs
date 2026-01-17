@@ -19,6 +19,6 @@ pub enum RatingSource {
     Imdb,    // 1-10 with 0.5 increments
     Netflix, // TBD (likely 1-5 stars or thumbs)
     Tmdb,    // TBD (likely 1-10 or 1-5)
-    Plex,    // 1-5 stars
+    Plex,    // 0-10 scale (stored as 1-10, API uses 0-10)
 }
 

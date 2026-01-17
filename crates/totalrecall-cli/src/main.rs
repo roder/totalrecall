@@ -156,9 +156,6 @@ enum ConfigCommands {
         server_url: Option<String>,
     },
 
-    /// Interactive configuration wizard
-    Interactive,
-
     /// Configure sync options
     Sync {
         /// Enable watchlist syncing
@@ -225,8 +222,10 @@ async fn main() -> color_eyre::Result<()> {
             start::run_stop(&output).await
         }
         Commands::Config { cmd } => {
-            let cmd = cmd.unwrap_or(ConfigCommands::Interactive);
-            config::run_config(cmd, &output).await
+            match cmd {
+                Some(cmd) => config::run_config(cmd, &output).await,
+                None => config::run_interactive_config(&output).await,
+            }
         },
         Commands::Clear { all, cache, credentials, timestamps } => clear::run_clear(all, cache, credentials, timestamps, &output).await,
     }

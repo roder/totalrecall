@@ -287,7 +287,46 @@ impl SyncOrchestrator {
             );
         }
         
-        let source_data_refs: Vec<(&str, &SourceData)> = collected_data.sources
+        // Normalize all ratings to 1-10 scale before resolution
+        // This ensures ratings from different sources are compared on the same scale
+        let mut normalized_source_data: Vec<(String, SourceData)> = Vec::new();
+        for (source_name, data) in &collected_data.sources {
+            // Find the source to get its normalizer
+            let source_index = self.find_source_index(source_name);
+            let normalized_ratings = if let Some(idx) = source_index {
+                if let Some(source_arc) = self.sources.get(idx) {
+                    let source_guard = source_arc.read().await;
+                    if let Some(normalizer) = source_guard.as_rating_normalization() {
+                        // Normalize each rating to 1-10 scale
+                        data.ratings.iter()
+                            .map(|r| {
+                                let normalized = normalizer.normalize_rating(r.rating as f64, 10);
+                                Rating { rating: normalized, ..r.clone() }
+                            })
+                            .collect()
+                    } else {
+                        // No normalizer - assume already 1-10 scale
+                        data.ratings.clone()
+                    }
+                } else {
+                    data.ratings.clone()
+                }
+            } else {
+                data.ratings.clone()
+            };
+            
+            normalized_source_data.push((
+                source_name.clone(),
+                SourceData {
+                    watchlist: data.watchlist.clone(),
+                    ratings: normalized_ratings,
+                    reviews: data.reviews.clone(),
+                    watch_history: data.watch_history.clone(),
+                }
+            ));
+        }
+        
+        let source_data_refs: Vec<(&str, &SourceData)> = normalized_source_data
             .iter()
             .map(|(name, data)| (name.as_str(), data))
             .collect();
@@ -1856,15 +1895,18 @@ impl SyncOrchestrator {
                 // Distribute ratings
                 if !ratings.is_empty() && sync_options.sync_ratings {
                     let source_guard = source_arc.read().await;
-                    // Handle Plex rating normalization
-                    let ratings_to_set = if source_name == "plex" {
+                    // Use RatingNormalization trait to denormalize from 1-10 scale to source's native scale
+                    let ratings_to_set = if let Some(normalizer) = source_guard.as_rating_normalization() {
                         ratings.iter()
-                                                .map(|r| {
-                                                    let rating = ((r.rating as f32 / 2.0).round() as u8).max(1).min(5);
-                                                    Rating { rating, ..r.clone() }
-                                                })
+                            .map(|r| {
+                                // Denormalize from 1-10 scale (stored) to source's native scale
+                                // The second parameter (10) is the source scale of the input rating
+                                let denormalized = normalizer.denormalize_rating(r.rating, 10) as u8;
+                                Rating { rating: denormalized, ..r.clone() }
+                            })
                             .collect::<Vec<_>>()
-                                            } else {
+                    } else {
+                        // No normalizer - assume already in correct scale
                         ratings.clone()
                     };
                     

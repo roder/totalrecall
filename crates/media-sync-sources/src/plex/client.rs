@@ -1535,8 +1535,13 @@ impl MediaSource for PlexClient {
                     trace!("Skipping rating for Discover provider item (rating_key={}): not supported by local server rating endpoint", rating_key);
                     tracker.record_skipped();
                 } else {
-                    // Convert from 1-10 scale to 0.0-10.0 (Plex uses 0.0-10.0)
-                    let rating_value = rating.rating as f64;
+                    // Convert from 1-10 scale (stored) to 0-10 scale (Plex API)
+                    // Plex API accepts 0-10, but we store as 1-10 to match other sources
+                    let rating_value = if rating.rating > 0 {
+                        (rating.rating - 1) as f64
+                    } else {
+                        0.0
+                    };
                     
                     match client.set_rating(&server_url, &rating_key, rating_value).await {
                         Ok(_) => {

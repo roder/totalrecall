@@ -18,7 +18,6 @@ pub async fn run_config(cmd: crate::ConfigCommands, output: &Output) -> Result<(
         crate::ConfigCommands::Sync { enable_watchlist, enable_ratings, enable_reviews, enable_watch_history } => {
             configure_sync(enable_watchlist, enable_ratings, enable_reviews, enable_watch_history, output).await
         }
-        crate::ConfigCommands::Interactive => run_interactive_config(output).await,
     }
 }
 
@@ -1286,7 +1285,7 @@ pub fn load_config_or_prompt_source_preference(output: &Output) -> Result<Config
         Config::load_from_file(&config_file)
             .map_err(|e| color_eyre::eyre::eyre!("Failed to load config from {}: {}", config_file.display(), e))?
     } else {
-        return Err(color_eyre::eyre::eyre!("Configuration file not found. Please run 'totalrecall config interactive' to set up your configuration."));
+        return Err(color_eyre::eyre::eyre!("Configuration file not found. Please run 'totalrecall config' to set up your configuration."));
     };
     
     // Check if source_preference is missing or empty

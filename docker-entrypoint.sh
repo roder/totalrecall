@@ -18,7 +18,7 @@ if [ "$1" != "start" ] && [ ! -f "$CONFIG_FILE" ]; then
         echo "  docker run -v /path/to/config.toml:${BASE_PATH}/config.toml totalrecall start"
         echo ""
         echo "Or run interactively to set up configuration:"
-        echo "  docker run -it --rm -v /path/to/totalrecall:${BASE_PATH} totalrecall config interactive"
+        echo "  docker run -it --rm -v /path/to/totalrecall:${BASE_PATH} totalrecall config"
         exit 1
     }
     echo ""
