@@ -69,8 +69,13 @@ impl CacheManager {
     }
 
     pub fn save_excluded(&self, source: &str, data: &[ExcludedItem]) -> Result<()> {
-        // Excluded items are created during distribution phase, so save to distribute directory
+        // Excluded items from distribution phase (filtered by timestamp/source) go to distribute directory
         self.save_distribute_data(source, "excluded", data)
+    }
+    
+    pub fn save_excluded_collect(&self, source: &str, data: &[ExcludedItem]) -> Result<()> {
+        // Excluded items from collect phase (unsupported media types) go to collect directory
+        self.save_source_data(source, "excluded", data)
     }
 
     fn load_source_data<T>(&self, source: &str, data_type: &str) -> Result<Option<Vec<T>>>

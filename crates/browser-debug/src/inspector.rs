@@ -153,11 +153,8 @@ impl PageInspector {
     /// Get comprehensive page state as JSON
     pub async fn get_page_state(&self) -> Result<Value> {
         let url = self.page.url().await?.map(|u| u.to_string()).unwrap_or_default();
-        // Note: chromiumoxide Page doesn't have a direct title() method
-        // We'll get it via JavaScript instead
         let title = String::new();
         
-        // Get page state via JavaScript
         let js = r#"
         (() => {
             return {
@@ -227,10 +224,6 @@ impl PageInspector {
             return Ok(Vec::new());
         }
         
-        // Note: chromiumoxide doesn't have direct console log capture
-        // We can use CDP Runtime.consoleAPICalled event, but for now
-        // we'll return an empty vec and note this as a future enhancement
-        // The actual implementation would require setting up event listeners
         Ok(Vec::new())
     }
     
@@ -240,8 +233,6 @@ impl PageInspector {
             return Ok(Vec::new());
         }
         
-        // Note: This would require enabling Network domain and listening to events
-        // For now, return empty vec
         Ok(Vec::new())
     }
     
@@ -335,7 +326,7 @@ impl PageInspector {
     }
 }
 
-fn sanitize_label(label: &str) -> String {
+pub(crate) fn sanitize_label(label: &str) -> String {
     label
         .chars()
         .map(|c| if c.is_alphanumeric() || c == '_' || c == '-' { c } else { '_' })

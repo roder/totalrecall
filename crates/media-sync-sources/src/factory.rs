@@ -1,7 +1,4 @@
 /// Source factory pattern for creating media sources from configuration
-/// 
-/// This module provides a factory pattern for creating media sources,
-/// centralizing source creation logic and making the system extensible.
 
 use anyhow::Result;
 use async_trait::async_trait;

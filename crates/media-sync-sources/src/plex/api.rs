@@ -765,7 +765,8 @@ impl PlexHttpClient {
     }
 
     pub async fn set_rating(&self, server_url: &str, rating_key: &str, rating: f64) -> Result<()> {
-        // Extract numeric ID from rating_key
+        // Extract numeric ID from rating_key (for local library keys)
+        // Discover provider keys are filtered out in the client before calling this function
         let id = rating_key
             .trim_start_matches("/library/metadata/")
             .trim();
@@ -774,6 +775,7 @@ impl PlexHttpClient {
             "{}/:/rate?identifier=com.plexapp.plugins.library&key={}&rating={}",
             server_url, id, rating
         );
+        
         let response = self
             .client
             .put(&url)
@@ -782,10 +784,19 @@ impl PlexHttpClient {
             .await
             .context("Failed to set rating")?;
 
-        if response.status().is_success() {
+        let status = response.status();
+        if status.is_success() {
+            debug!("Plex API: Successfully set rating: rating_key={}, rating={}", 
+                   rating_key, rating);
             Ok(())
         } else {
-            Err(anyhow::anyhow!("Failed to set rating: {}", response.status()))
+            // Try to read response body for more details
+            let error_msg = if let Ok(body) = response.text().await {
+                format!("HTTP {}: {}", status, body)
+            } else {
+                format!("HTTP {}", status)
+            };
+            Err(anyhow::anyhow!("Failed to set rating: {}", error_msg))
         }
     }
 
@@ -989,11 +1000,51 @@ impl PlexHttpClient {
         Ok(history)
     }
 
-    /// Search for media items by title on a Plex server
-    /// Returns items with their GUIDs which can be used to extract IMDB IDs
-    pub async fn search_by_title(&self, server_url: &str, title: &str, year: Option<u32>, media_type: &str) -> Result<Vec<MetadataItem>> {
-        // Plex search endpoint: /library/search?query={title}&type={type}
-        // type: 1 for movie, 2 for show
+    /// Normalize title for Plex search to handle punctuation issues
+    /// Tries to simplify titles that might cause search failures due to special characters
+    fn normalize_title_for_search(title: &str) -> Vec<String> {
+        let mut variants = Vec::new();
+        
+        // 1. Original title (exact match)
+        variants.push(title.to_string());
+        
+        // 2. Extract main title part (before first colon or slash) - common for episode titles
+        // e.g., "Show Name: Episode Title" -> "Show Name"
+        if let Some(main_part) = title.split(':').next()
+            .or_else(|| title.split('/').next())
+            .map(|s| s.trim()) {
+            if main_part != title && !main_part.is_empty() {
+                variants.push(main_part.to_string());
+            }
+        }
+        
+        // 3. Simplified version: replace problematic punctuation with spaces
+        // This helps with titles like "Tosh.0" or "Fate/stay night"
+        let simplified = title
+            .replace('/', " ")
+            .replace(':', " ")
+            .replace('(', " ")
+            .replace(')', " ")
+            .replace('[', " ")
+            .replace(']', " ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        if simplified != title && !simplified.is_empty() {
+            variants.push(simplified);
+        }
+        
+        variants
+    }
+    
+    /// Internal helper to perform a single search query
+    async fn search_by_title_internal(
+        &self,
+        server_url: &str,
+        title: &str,
+        year: Option<u32>,
+        media_type: &str,
+    ) -> Result<Vec<MetadataItem>> {
         let type_num = match media_type {
             "movie" => "1",
             "show" => "2",
@@ -1014,8 +1065,6 @@ impl PlexHttpClient {
         if let Some(year_val) = year {
             url.push_str(&format!("&year={}", year_val));
         }
-        
-        debug!("Plex search: Searching for '{}' (type: {}, year: {:?})", title, media_type, year);
         
         let response = self
             .client
@@ -1039,15 +1088,8 @@ impl PlexHttpClient {
                 .and_then(|v| v.as_array());
             
             if let Some(items_array) = items_array {
-                debug!("Plex search: Found {} results for '{}'", items_array.len(), title);
-                for (idx, item) in items_array.iter().enumerate() {
+                for item in items_array {
                     if let Some(metadata_item) = self.parse_metadata_item(item, media_type) {
-                        if idx < 3 {
-                            debug!("Plex search result[{}]: rating_key={}, title={}, year={:?}, guids={:?}", 
-                                   idx, metadata_item.rating_key, metadata_item.title, 
-                                   metadata_item.year, 
-                                   metadata_item.guids.iter().map(|g| &g.id).collect::<Vec<_>>());
-                        }
                         results.push(MetadataItem {
                             rating_key: metadata_item.rating_key,
                             user_rating: metadata_item.user_rating,
@@ -1056,17 +1098,49 @@ impl PlexHttpClient {
                         });
                     }
                 }
-            } else {
-                debug!("Plex search: No results found for '{}'", title);
             }
         }
         
         Ok(results)
     }
 
-    /// Search Plex discover provider for items not in local library
-    /// Returns items with their rating_keys (metadata keys) which can be used with discover provider API
-    pub async fn search_discover_provider(
+    /// Search for media items by title on a Plex server
+    /// Returns items with their GUIDs which can be used to extract IMDB IDs
+    /// Tries multiple search strategies to handle titles with problematic punctuation
+    pub async fn search_by_title(&self, server_url: &str, title: &str, year: Option<u32>, media_type: &str) -> Result<Vec<MetadataItem>> {
+        debug!("Plex search: Searching for '{}' (type: {}, year: {:?})", title, media_type, year);
+        
+        // Try multiple title variants to handle punctuation issues
+        let title_variants = Self::normalize_title_for_search(title);
+        
+        for (idx, variant) in title_variants.iter().enumerate() {
+            match self.search_by_title_internal(server_url, variant, year, media_type).await {
+                Ok(results) => {
+                    if !results.is_empty() {
+                        if idx > 0 {
+                            debug!("Plex search: Found {} results using normalized title '{}' (original: '{}')", 
+                                   results.len(), variant, title);
+                        } else {
+                            debug!("Plex search: Found {} results for '{}'", results.len(), title);
+                        }
+                        return Ok(results);
+                    }
+                }
+                Err(e) => {
+                    if idx == 0 {
+                        // Only log error for first attempt (exact match)
+                        debug!("Plex search failed for '{}': {}", title, e);
+                    }
+                }
+            }
+        }
+        
+        debug!("Plex search: No results found for '{}' (tried {} variants)", title, title_variants.len());
+        Ok(Vec::new())
+    }
+
+    /// Internal helper to perform a single discover provider search query
+    async fn search_discover_provider_internal(
         &self,
         title: &str,
         year: Option<u32>,
@@ -1097,8 +1171,6 @@ impl PlexHttpClient {
         if let Some(year_val) = year {
             url.push_str(&format!("&year={}", year_val));
         }
-        
-        debug!("Plex discover provider search: Searching for '{}' (type: {}, year: {:?})", title, media_type, year);
         
         let response = self
             .client
@@ -1220,9 +1292,47 @@ impl PlexHttpClient {
             }
         }
         
-        debug!("Plex discover provider search: Found {} results for '{}'", results.len(), title);
-        
         Ok(results)
+    }
+
+    /// Search Plex discover provider for items not in local library
+    /// Returns items with their rating_keys (metadata keys) which can be used with discover provider API
+    /// Tries multiple search strategies to handle titles with problematic punctuation
+    pub async fn search_discover_provider(
+        &self,
+        title: &str,
+        year: Option<u32>,
+        media_type: &str,
+    ) -> Result<Vec<MetadataItem>> {
+        debug!("Plex discover provider search: Searching for '{}' (type: {}, year: {:?})", title, media_type, year);
+        
+        // Try multiple title variants to handle punctuation issues
+        let title_variants = Self::normalize_title_for_search(title);
+        
+        for (idx, variant) in title_variants.iter().enumerate() {
+            match self.search_discover_provider_internal(variant, year, media_type).await {
+                Ok(results) => {
+                    if !results.is_empty() {
+                        if idx > 0 {
+                            debug!("Plex discover provider search: Found {} results using normalized title '{}' (original: '{}')", 
+                                   results.len(), variant, title);
+                        } else {
+                            debug!("Plex discover provider search: Found {} results for '{}'", results.len(), title);
+                        }
+                        return Ok(results);
+                    }
+                }
+                Err(e) => {
+                    if idx == 0 {
+                        // Only log error for first attempt (exact match)
+                        debug!("Plex discover provider search failed for '{}': {}", title, e);
+                    }
+                }
+            }
+        }
+        
+        debug!("Plex discover provider search: No results found for '{}' (tried {} variants)", title, title_variants.len());
+        Ok(Vec::new())
     }
 
     pub async fn mark_watched(&self, server_url: &str, rating_key: &str) -> Result<()> {
@@ -1231,30 +1341,43 @@ impl PlexHttpClient {
         // For discover provider items, try using tv.plex.provider.discover as identifier
         // The key should be the rating_key (hex string like 5d9c08742192ba001f3117cd)
         
+        // Detect if this is a Discover provider key (long hex string, 20+ chars) 
+        // vs local library key (short numeric, typically < 10 chars)
+        let is_discover_key = rating_key.len() >= 20 && rating_key.chars().all(|c| c.is_ascii_hexdigit());
+        
         // Create the full key path string before the loop
         let full_key_path = format!("/library/metadata/{}", rating_key);
         
-        // Try discover provider identifier first (for items not in local library)
-        let identifiers = vec![
-            ("tv.plex.provider.discover", rating_key),
-            ("com.plexapp.plugins.library", rating_key),
-            ("tv.plex.provider.discover", &full_key_path),
-        ];
+        // Only try appropriate identifier/key combinations based on key type
+        let identifiers: Vec<(&str, &str)> = if is_discover_key {
+            // For Discover provider keys, only try discover provider identifiers
+            vec![
+                ("tv.plex.provider.discover", rating_key),
+                ("tv.plex.provider.discover", &full_key_path),
+            ]
+        } else {
+            // For local library keys, try local library identifier first, then discover as fallback
+            vec![
+                ("com.plexapp.plugins.library", rating_key),
+                ("tv.plex.provider.discover", rating_key),
+                ("tv.plex.provider.discover", &full_key_path),
+            ]
+        };
         
         for (identifier, key) in identifiers {
-        let url = format!(
+            let url = format!(
                 "{}/:/scrobble?identifier={}&key={}",
                 server_url, identifier, key
-        );
+            );
             debug!("Plex API: Calling mark_watched (PUT) for rating_key={}, identifier={}, key={}, url={}", 
                    rating_key, identifier, key, url);
             
-        let response = self
-            .client
+            let response = self
+                .client
                 .put(&url)
-            .header("X-Plex-Token", &self.token)
-            .send()
-            .await
+                .header("X-Plex-Token", &self.token)
+                .send()
+                .await
                 .context(format!("Failed to mark as watched (identifier={}, key={})", identifier, key))?;
 
             let status = response.status();
@@ -1272,8 +1395,16 @@ impl PlexHttpClient {
                 } else {
                     format!("HTTP {}", status)
                 };
-                debug!("Plex API: mark_watched failed with identifier={}, key={}: {}", 
-                       identifier, key, error_msg);
+                
+                // Only log at debug level for expected failures (404 when trying wrong identifier type)
+                // This prevents log flooding when we try com.plexapp.plugins.library with Discover keys
+                if status == 404 && is_discover_key && identifier == "com.plexapp.plugins.library" {
+                    // Skip logging expected failures - we know Discover keys won't work with local library identifier
+                    // Continue to next identifier/key combination
+                } else {
+                    debug!("Plex API: mark_watched failed with identifier={}, key={}: {}", 
+                           identifier, key, error_msg);
+                }
                 // Continue to next identifier/key combination
             }
         }

@@ -1,17 +1,26 @@
 use anyhow::Result;
 use chromiumoxide::Page;
 use media_sync_models::{Rating, Review, WatchHistory, WatchlistItem};
+use crate::ProgressTracker;
 use std::time::Duration;
 use tokio::time::sleep;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, trace, warn};
 use browser_debug::PageInspector;
 
 /// Add items to IMDB watchlist
 pub async fn add_to_watchlist(page: &Page, items: &[WatchlistItem]) -> Result<()> {
+    if items.is_empty() {
+        return Ok(());
+    }
+
+    let progress_interval = if items.len() < 50 { 10 } else { 50 };
+    let mut tracker = ProgressTracker::new(items.len(), progress_interval);
+
     for (idx, item) in items.iter().enumerate() {
-        info!(
+        let current = idx + 1;
+        trace!(
             "Adding item {} of {} to IMDB watchlist: {} ({})",
-            idx + 1,
+            current,
             items.len(),
             item.title,
             item.imdb_id
@@ -40,9 +49,11 @@ pub async fn add_to_watchlist(page: &Page, items: &[WatchlistItem]) -> Result<()
                     if classes.contains("not-inWL") {
                         button.click().await?;
                         sleep(Duration::from_secs(1)).await;
-                        info!("Added {} to IMDB watchlist (reference view)", item.title);
+                        trace!("Added {} to IMDB watchlist (reference view)", item.title);
+                        tracker.record_added();
                     } else {
-                        info!("{} already in IMDB watchlist (reference view)", item.title);
+                        trace!("{} already in IMDB watchlist (reference view)", item.title);
+                        tracker.record_already_present();
                     }
                 }
                 Err(e) => {
@@ -89,37 +100,52 @@ pub async fn add_to_watchlist(page: &Page, items: &[WatchlistItem]) -> Result<()
                                 .await
                             {
                                 Ok(_) => {
-                                    info!("Added {} to IMDB watchlist", item.title);
+                                    trace!("Added {} to IMDB watchlist", item.title);
+                                    tracker.record_added();
                                     break;
                                 }
                                 Err(_) => {
                                     retry_count += 1;
                                     if retry_count >= 2 {
                                         warn!("Failed to add {} to IMDB watchlist after retries", item.title);
+                                        tracker.record_failed();
                                     }
                                 }
                             }
                         }
                     } else {
-                        info!("{} already in IMDB watchlist", item.title);
+                        trace!("{} already in IMDB watchlist", item.title);
+                        tracker.record_already_present();
                     }
                 }
                 Err(e) => {
                     warn!("Failed to find watchlist button for {}: {}", item.imdb_id, e);
+                    tracker.record_failed();
                 }
             }
         }
+
+        tracker.log_progress(current);
     }
 
+    tracker.log_summary("IMDB watchlist add");
     Ok(())
 }
 
 /// Remove items from IMDB watchlist
 pub async fn remove_from_watchlist(page: &Page, items: &[WatchlistItem]) -> Result<()> {
+    if items.is_empty() {
+        return Ok(());
+    }
+
+    let progress_interval = if items.len() < 50 { 10 } else { 50 };
+    let mut tracker = ProgressTracker::new(items.len(), progress_interval);
+
     for (idx, item) in items.iter().enumerate() {
-        info!(
+        let current = idx + 1;
+        trace!(
             "Removing item {} of {} from IMDB watchlist: {} ({})",
-            idx + 1,
+            current,
             items.len(),
             item.title,
             item.imdb_id
@@ -148,9 +174,11 @@ pub async fn remove_from_watchlist(page: &Page, items: &[WatchlistItem]) -> Resu
                     if !classes.contains("not-inWL") {
                         button.click().await?;
                         sleep(Duration::from_secs(1)).await;
-                        info!("Removed {} from IMDB watchlist (reference view)", item.title);
+                        trace!("Removed {} from IMDB watchlist (reference view)", item.title);
+                        tracker.record_added();
                     } else {
-                        info!("{} not in IMDB watchlist (reference view)", item.title);
+                        trace!("{} not in IMDB watchlist (reference view)", item.title);
+                        tracker.record_skipped();
                     }
                 }
                 Err(e) => {
@@ -197,28 +225,35 @@ pub async fn remove_from_watchlist(page: &Page, items: &[WatchlistItem]) -> Resu
                                 .await
                             {
                                 Ok(_) => {
-                                    info!("Removed {} from IMDB watchlist", item.title);
+                                    trace!("Removed {} from IMDB watchlist", item.title);
+                                    tracker.record_added();
                                     break;
                                 }
                                 Err(_) => {
                                     retry_count += 1;
                                     if retry_count >= 2 {
                                         warn!("Failed to remove {} from IMDB watchlist after retries", item.title);
+                                        tracker.record_failed();
                                     }
                                 }
                             }
                         }
                     } else {
-                        info!("{} not in IMDB watchlist", item.title);
+                        trace!("{} not in IMDB watchlist", item.title);
+                        tracker.record_skipped();
                     }
                 }
                 Err(e) => {
                     warn!("Failed to find watchlist button for {}: {}", item.imdb_id, e);
+                    tracker.record_failed();
                 }
             }
         }
+
+        tracker.log_progress(current);
     }
 
+    tracker.log_summary("IMDB watchlist remove");
     Ok(())
 }
 
@@ -228,13 +263,18 @@ pub async fn set_ratings(
     ratings: &[Rating],
     mut inspector: Option<&mut PageInspector>,
 ) -> Result<()> {
-    let mut success_count = 0;
-    let mut failure_count = 0;
+    if ratings.is_empty() {
+        return Ok(());
+    }
+
+    let progress_interval = if ratings.len() < 50 { 10 } else { 50 };
+    let mut tracker = ProgressTracker::new(ratings.len(), progress_interval);
     
     for (idx, rating) in ratings.iter().enumerate() {
-        info!(
+        let current = idx + 1;
+        trace!(
             "Setting rating {} of {} on IMDB: {} - {}/10",
-            idx + 1,
+            current,
             ratings.len(),
             rating.imdb_id,
             rating.rating
@@ -255,7 +295,8 @@ pub async fn set_ratings(
             }
             Err(e) => {
                 warn!("Failed to navigate to {}: {}", url, e);
-                failure_count += 1;
+                tracker.record_failed();
+                tracker.log_progress(current);
                 continue;
             }
         }
@@ -264,7 +305,8 @@ pub async fn set_ratings(
             Ok(url) => url.unwrap_or_default(),
             Err(e) => {
                 warn!("Failed to get current URL for {}: {}", rating.imdb_id, e);
-                failure_count += 1;
+                tracker.record_failed();
+                tracker.log_progress(current);
                 continue;
             }
         };
@@ -290,7 +332,7 @@ pub async fn set_ratings(
             match result {
                 Ok(true) => {
                     rating_set = true;
-                    success_count += 1;
+                    tracker.record_added();
                 }
                 Ok(false) => {
                     // Try reference view as fallback
@@ -310,27 +352,23 @@ pub async fn set_ratings(
             
             match try_set_rating_reference_view(page, rating).await {
                 Ok(true) => {
-                    success_count += 1;
+                    tracker.record_added();
                 }
                 Ok(false) => {
                     warn!("Failed to set rating for {} - all selector strategies failed", rating.imdb_id);
-                    failure_count += 1;
+                    tracker.record_failed();
                 }
                 Err(e) => {
                     warn!("Error setting rating for {} (reference view): {}", rating.imdb_id, e);
-                    failure_count += 1;
+                    tracker.record_failed();
                 }
             }
         }
+
+        tracker.log_progress(current);
     }
 
-    if failure_count > 0 {
-        warn!("Failed to set {} out of {} ratings on IMDB", failure_count, ratings.len());
-    }
-    if success_count > 0 {
-        info!("Successfully set {} ratings on IMDB", success_count);
-    }
-
+    tracker.log_summary("IMDB ratings set");
     Ok(())
 }
 
@@ -589,7 +627,7 @@ async fn try_set_rating_normal_view(page: &Page, rating: &Rating) -> Result<bool
                                             
                                             if submit_click_success {
                                                 sleep(Duration::from_secs(1)).await;
-                                                info!("Set rating {}/10 for {} on IMDB", rating.rating, rating.imdb_id);
+                                                trace!("Set rating {}/10 for {} on IMDB", rating.rating, rating.imdb_id);
                                                 return Ok(true);
                                             }
                                         }
@@ -600,7 +638,7 @@ async fn try_set_rating_normal_view(page: &Page, rating: &Rating) -> Result<bool
                                 }
                                 
                                 // If no submit button found, rating might be set directly
-                                info!("Set rating {}/10 for {} on IMDB (no submit button found)", rating.rating, rating.imdb_id);
+                                trace!("Set rating {}/10 for {} on IMDB (no submit button found)", rating.rating, rating.imdb_id);
                                 return Ok(true);
                             }
                             Err(e) => {
@@ -609,7 +647,7 @@ async fn try_set_rating_normal_view(page: &Page, rating: &Rating) -> Result<bool
                         }
                     }
                 } else {
-                    info!("Rating {}/10 already set for {} on IMDB", rating.rating, rating.imdb_id);
+                    trace!("Rating {}/10 already set for {} on IMDB", rating.rating, rating.imdb_id);
                     return Ok(true);
                 }
             }
@@ -707,7 +745,7 @@ async fn try_set_rating_reference_view(page: &Page, rating: &Rating) -> Result<b
                             
                             if rating_click_success {
                                 sleep(Duration::from_secs(1)).await;
-                                info!("Set rating {}/10 for {} on IMDB (reference view)", rating.rating, rating.imdb_id);
+                                trace!("Set rating {}/10 for {} on IMDB (reference view)", rating.rating, rating.imdb_id);
                                 return Ok(true);
                             }
                         }
@@ -744,10 +782,18 @@ pub async fn set_reviews(
         }
     }
 
+    if reviews.is_empty() {
+        return Ok(());
+    }
+
+    let progress_interval = if reviews.len() < 25 { 10 } else { 25 };
+    let mut tracker = ProgressTracker::new(reviews.len(), progress_interval);
+
     for (idx, review) in reviews.iter().enumerate() {
-        info!(
+        let current = idx + 1;
+        trace!(
             "Setting review {} of {} on IMDB: {}",
-            idx + 1,
+            current,
             reviews.len(),
             review.imdb_id
         );
@@ -819,31 +865,46 @@ pub async fn set_reviews(
                         Ok(submit_button) => {
                             submit_button.click().await?;
                             sleep(Duration::from_secs(3)).await;
-                            info!("Submitted review for {} on IMDB", review.imdb_id);
+                            trace!("Submitted review for {} on IMDB", review.imdb_id);
+                            tracker.record_added();
                         }
                         Err(e) => {
                             warn!("Failed to find submit button for {}: {}", review.imdb_id, e);
+                            tracker.record_failed();
                         }
                     }
                 } else {
-                    info!("Review already exists for {} on IMDB", review.imdb_id);
+                    trace!("Review already exists for {} on IMDB", review.imdb_id);
+                    tracker.record_already_present();
                 }
             }
             Err(e) => {
                 warn!("Failed to find title input for {}: {}", review.imdb_id, e);
+                tracker.record_failed();
             }
         }
+
+        tracker.log_progress(current);
     }
 
+    tracker.log_summary("IMDB reviews set");
     Ok(())
 }
 
 /// Add watch history (check-ins) on IMDB
 pub async fn add_watch_history(page: &Page, items: &[WatchHistory]) -> Result<()> {
+    if items.is_empty() {
+        return Ok(());
+    }
+
+    let progress_interval = if items.len() < 50 { 10 } else { 50 };
+    let mut tracker = ProgressTracker::new(items.len(), progress_interval);
+
     for (idx, item) in items.iter().enumerate() {
-        info!(
+        let current = idx + 1;
+        trace!(
             "Adding check-in {} of {} on IMDB: {} ({})",
-            idx + 1,
+            current,
             items.len(),
             item.imdb_id,
             item.watched_at
@@ -851,24 +912,26 @@ pub async fn add_watch_history(page: &Page, items: &[WatchHistory]) -> Result<()
 
         let url = format!("https://www.imdb.com/title/{}/", item.imdb_id);
         page.goto(&url).await?;
-        sleep(Duration::from_secs(2)).await;
+        sleep(Duration::from_millis(500)).await; // Reduced from 2s - page should load faster
 
         let current_url = page.url().await?.unwrap_or_default();
         let current_url_str = current_url.as_str();
 
         // Skip reference view (not supported)
         if current_url_str.contains("/reference") {
-            warn!("Skipping check-in for {} (reference view not supported)", item.imdb_id);
+            trace!("Skipping check-in for {} (reference view not supported)", item.imdb_id);
+            tracker.record_skipped();
+            tracker.log_progress(current);
             continue;
         }
 
-        // Wait for loader to disappear
+        // Wait for loader to disappear (reduced attempts for speed)
         let loader_selector = "[data-testid=\"tm-box-wl-loader\"]";
         let mut attempts = 0;
-        while attempts < 10 {
+        while attempts < 2 {
             match page.find_element(loader_selector).await {
                 Ok(_) => {
-                    sleep(Duration::from_millis(500)).await;
+                    sleep(Duration::from_millis(300)).await;
                     attempts += 1;
                 }
                 Err(_) => break,
@@ -879,14 +942,33 @@ pub async fn add_watch_history(page: &Page, items: &[WatchHistory]) -> Result<()
         match page.find_element(button_selector).await {
             Ok(button) => {
                 button.scroll_into_view().await?;
-                sleep(Duration::from_secs(1)).await;
+                sleep(Duration::from_millis(300)).await; // Reduced from 1s
 
                 button.click().await?;
-                sleep(Duration::from_secs(1)).await;
+                sleep(Duration::from_millis(300)).await; // Reduced from 1s
+
+                // Wait for dropdown menu to appear before trying to find "Your check-ins" option
+                // Reduced attempts for speed - dropdown usually appears quickly
+                let mut checkins_element = None;
+                let mut attempts = 0;
+                while attempts < 3 {
+                    match page.find_xpath("//div[contains(text(), 'Your check-ins')]").await {
+                        Ok(element) => {
+                            checkins_element = Some(element);
+                            break;
+                        }
+                        Err(_) => {
+                            attempts += 1;
+                            if attempts < 3 {
+                                sleep(Duration::from_millis(150)).await;
+                            }
+                        }
+                    }
+                }
 
                 // Find "Your check-ins" option using XPath (matching Python: //div[contains(text(), 'Your check-ins')])
-                match page.find_xpath("//div[contains(text(), 'Your check-ins')]").await {
-                    Ok(checkins_element) => {
+                match checkins_element {
+                    Some(checkins_element) => {
                         // Check if already in check-ins (matching Python: 'true' not in watch_history_button.get_attribute('data-titleinlist'))
                         let data_titleinlist = checkins_element
                             .attribute("data-titleinlist")
@@ -898,36 +980,44 @@ pub async fn add_watch_history(page: &Page, items: &[WatchHistory]) -> Result<()
                             let mut retry_count = 0;
                             while retry_count < 2 {
                                 checkins_element.click().await?;
-                                sleep(Duration::from_secs(1)).await;
+                                sleep(Duration::from_millis(400)).await; // Reduced from 1s
 
                                 // Verify it was added (matching Python: WebDriverWait until presence_of_element_located with data-titleinlist='true')
                                 match page.find_xpath("//div[contains(@class, 'ipc-promptable-base__content')]//div[@data-titleinlist='true']").await {
                                     Ok(_) => {
-                                        info!("Added check-in for {} on IMDB", item.imdb_id);
+                                        trace!("Added check-in for {} on IMDB", item.imdb_id);
+                                        tracker.record_added();
                                         break;
                                     }
                                     Err(_) => {
                                         retry_count += 1;
                                         if retry_count >= 2 {
-                                            warn!("Failed to verify check-in for {} after retries", item.imdb_id);
+                                            trace!("Failed to verify check-in for {} after retries", item.imdb_id);
+                                            tracker.record_failed();
                                         }
                                     }
                                 }
                             }
                         } else {
-                            info!("{} already in IMDB check-ins", item.imdb_id);
+                            trace!("{} already in IMDB check-ins", item.imdb_id);
+                            tracker.record_already_present();
                         }
                     }
-                    Err(e) => {
-                        warn!("Failed to find 'Your check-ins' option for {}: {}", item.imdb_id, e);
+                    None => {
+                        trace!("Failed to find 'Your check-ins' option for {} after {} attempts: dropdown menu may not have appeared", item.imdb_id, attempts);
+                        tracker.record_failed();
                     }
                 }
             }
             Err(e) => {
-                warn!("Failed to find add to list button for {}: {}", item.imdb_id, e);
+                trace!("Failed to find add to list button for {}: {}", item.imdb_id, e);
+                tracker.record_failed();
             }
         }
+
+        tracker.log_progress(current);
     }
 
+    tracker.log_summary("IMDB check-ins add");
     Ok(())
 }

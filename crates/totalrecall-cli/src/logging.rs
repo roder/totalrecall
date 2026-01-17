@@ -1,12 +1,17 @@
 use anyhow::Result;
 use std::io;
 use std::io::IsTerminal;
+use std::path::PathBuf;
 use tracing_subscriber::{
     layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Registry,
 };
 use tracing_subscriber::fmt::{self, time::ChronoUtc};
 
 pub fn init_logging(verbose_level: u8, quiet: bool) -> Result<()> {
+    init_logging_with_file(verbose_level, quiet, None)
+}
+
+pub fn init_logging_with_file(verbose_level: u8, quiet: bool, log_file: Option<PathBuf>) -> Result<()> {
     // Determine log level from verbose count
     // 0 = info, 1 = debug (with hyper::proto::h1 suppressed), 2+ = trace (all logs)
     let filter = if quiet {
@@ -37,19 +42,49 @@ pub fn init_logging(verbose_level: u8, quiet: bool) -> Result<()> {
 
     let registry = Registry::default().with(filter);
 
-    if json {
-        let json_layer = fmt::layer()
-            .json()
-            .with_timer(ChronoUtc::rfc_3339())
-            .with_writer(io::stderr);
+    // If log file is provided, write to file; otherwise write to stderr
+    if let Some(log_path) = log_file {
+        // Ensure log directory exists
+        if let Some(parent) = log_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
 
-        registry.with(json_layer).init();
+        // Open log file in append mode
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)?;
+
+        if json {
+            let json_layer = fmt::layer()
+                .json()
+                .with_timer(ChronoUtc::rfc_3339())
+                .with_writer(file);
+
+            registry.with(json_layer).init();
+        } else {
+            let fmt_layer = fmt::layer()
+                .with_timer(ChronoUtc::rfc_3339())
+                .with_ansi(false)  // Disable ANSI codes when writing to file
+                .with_writer(file);
+
+            registry.with(fmt_layer).init();
+        }
     } else {
-        let fmt_layer = fmt::layer()
-            .with_timer(ChronoUtc::rfc_3339())
-            .with_writer(io::stderr);
+        if json {
+            let json_layer = fmt::layer()
+                .json()
+                .with_timer(ChronoUtc::rfc_3339())
+                .with_writer(io::stderr);
 
-        registry.with(fmt_layer).init();
+            registry.with(json_layer).init();
+        } else {
+            let fmt_layer = fmt::layer()
+                .with_timer(ChronoUtc::rfc_3339())
+                .with_writer(io::stderr);
+
+            registry.with(fmt_layer).init();
+        }
     }
 
     Ok(())

@@ -1,7 +1,5 @@
 pub mod sync;
 pub mod diff;
-pub mod filter;
-pub mod update;
 pub mod resolution;
 pub mod cache;
 pub mod distribution;

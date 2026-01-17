@@ -2,6 +2,13 @@ use anyhow::Result;
 use dirs;
 use std::path::{Path, PathBuf};
 
+/// Get the container base path from environment variable, defaulting to "/app"
+pub fn container_base_path() -> PathBuf {
+    std::env::var("TOTALRECALL_BASE_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("/app"))
+}
+
 pub struct PathManager {
     config_dir: PathBuf,
     data_dir: PathBuf,
@@ -22,10 +29,12 @@ impl PathManager {
     }
 
     pub fn from_docker_env() -> Self {
+        let base = container_base_path();
+        // In containers, match the default structure: config files at base level, data/logs in subdirs
         Self {
-            config_dir: PathBuf::from("/app/config"),
-            data_dir: PathBuf::from("/app/data"),
-            log_dir: PathBuf::from("/app/logs"),
+            config_dir: base.clone(),  // Config files go directly in base path
+            data_dir: base.join("data"),
+            log_dir: base.join("logs"),
         }
     }
 
@@ -69,6 +78,10 @@ impl PathManager {
         self.config_dir.join("credentials.toml")
     }
 
+    pub fn daemon_log_file(&self) -> PathBuf {
+        self.log_dir.join("daemon.log")
+    }
+
     pub fn ensure_directories(&self) -> Result<()> {
         std::fs::create_dir_all(&self.config_dir)?;
         std::fs::create_dir_all(&self.data_dir)?;
@@ -83,6 +96,14 @@ impl PathManager {
 
 impl Default for PathManager {
     fn default() -> Self {
+        // Check if we're in a Docker container by looking for container base directory
+        // This is created in the Containerfile, so its presence indicates Docker
+        let base = container_base_path();
+        if base.exists() {
+            return Self::from_docker_env();
+        }
+        
+        // Otherwise, use platform-specific paths (e.g., ~/.config/totalrecall on Linux)
         Self::new().unwrap_or_else(|_| Self::from_docker_env())
     }
 }

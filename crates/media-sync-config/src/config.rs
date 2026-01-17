@@ -65,7 +65,6 @@ pub struct SourceConfig {
 pub struct ImdbConfig {
     pub enabled: bool,
     pub username: String,
-    // Password stored separately in credentials
     #[serde(default = "default_imdb_status_mapping")]
     pub status_mapping: StatusMapping,
 }
@@ -74,7 +73,6 @@ pub struct ImdbConfig {
 pub struct PlexConfig {
     pub enabled: bool,
     pub server_url: String,
-    // Token stored separately in credentials
     #[serde(default = "default_plex_status_mapping")]
     pub status_mapping: StatusMapping,
 }
@@ -137,7 +135,7 @@ impl Default for ResolutionConfig {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct SyncOptions {
     #[serde(default = "default_true")]
     pub sync_watchlist: bool,
@@ -157,6 +155,7 @@ pub struct SyncOptions {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SchedulerConfig {
+    #[serde(default = "default_schedule")]
     pub schedule: String,
     #[serde(default = "default_timezone")]
     pub timezone: String,
@@ -181,8 +180,20 @@ fn default_true() -> bool {
     true
 }
 
+fn default_schedule() -> String {
+    "0 */6 * * *".to_string()  // Every 6 hours
+}
+
 fn default_timezone() -> String {
-    "UTC".to_string()
+    std::env::var("TZ").unwrap_or_else(|_| "UTC".to_string())
+}
+
+pub fn default_scheduler_config() -> SchedulerConfig {
+    SchedulerConfig {
+        schedule: default_schedule(),
+        timezone: default_timezone(),
+        run_on_startup: default_true(),
+    }
 }
 
 fn default_log_level() -> String {
@@ -308,66 +319,54 @@ impl Config {
             return Err(anyhow::anyhow!("source_preference is required and cannot be empty"));
         }
         
-        // Validate that all sources in source_preference are configured and enabled
         let valid_sources = ["trakt", "imdb", "plex", "simkl"];
         for source in &self.resolution.source_preference {
             if !valid_sources.contains(&source.as_str()) {
                 return Err(anyhow::anyhow!("Invalid source in source_preference: {}", source));
             }
             
-            // Check if source is configured and enabled
             match source.as_str() {
                 "trakt" => {
-                    if let Some(ref trakt) = self.trakt {
-                        if !trakt.enabled {
-                            return Err(anyhow::anyhow!("Trakt is in source_preference but is not enabled"));
-                        }
-                        if trakt.client_id.is_empty() || trakt.client_id == "YOUR_CLIENT_ID" {
-                            return Err(anyhow::anyhow!("Trakt is in source_preference but client_id is not configured"));
-                        }
-                        if trakt.client_secret.is_empty() || trakt.client_secret == "YOUR_CLIENT_SECRET" {
-                            return Err(anyhow::anyhow!("Trakt is in source_preference but client_secret is not configured"));
-                        }
-                    } else {
-                        return Err(anyhow::anyhow!("Trakt is in source_preference but is not configured"));
+                    let trakt = self.trakt.as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("Trakt is in source_preference but is not configured"))?;
+                    if !trakt.enabled {
+                        return Err(anyhow::anyhow!("Trakt is in source_preference but is not enabled"));
+                    }
+                    if trakt.client_id.is_empty() || trakt.client_id == "YOUR_CLIENT_ID" {
+                        return Err(anyhow::anyhow!("Trakt is in source_preference but client_id is not configured"));
+                    }
+                    if trakt.client_secret.is_empty() || trakt.client_secret == "YOUR_CLIENT_SECRET" {
+                        return Err(anyhow::anyhow!("Trakt is in source_preference but client_secret is not configured"));
                     }
                 }
                 "simkl" => {
-                    if let Some(ref simkl) = self.simkl {
-                        if !simkl.enabled {
-                            return Err(anyhow::anyhow!("Simkl is in source_preference but is not enabled"));
-                        }
-                        if simkl.client_id.is_empty() || simkl.client_id == "YOUR_CLIENT_ID" {
-                            return Err(anyhow::anyhow!("Simkl is in source_preference but client_id is not configured"));
-                        }
-                        if simkl.client_secret.is_empty() || simkl.client_secret == "YOUR_CLIENT_SECRET" {
-                            return Err(anyhow::anyhow!("Simkl is in source_preference but client_secret is not configured"));
-                        }
-                    } else {
-                        return Err(anyhow::anyhow!("Simkl is in source_preference but is not configured"));
+                    let simkl = self.simkl.as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("Simkl is in source_preference but is not configured"))?;
+                    if !simkl.enabled {
+                        return Err(anyhow::anyhow!("Simkl is in source_preference but is not enabled"));
+                    }
+                    if simkl.client_id.is_empty() || simkl.client_id == "YOUR_CLIENT_ID" {
+                        return Err(anyhow::anyhow!("Simkl is in source_preference but client_id is not configured"));
+                    }
+                    if simkl.client_secret.is_empty() || simkl.client_secret == "YOUR_CLIENT_SECRET" {
+                        return Err(anyhow::anyhow!("Simkl is in source_preference but client_secret is not configured"));
                     }
                 }
                 "imdb" => {
-                    if let Some(ref imdb) = self.sources.imdb {
-                        if !imdb.enabled {
-                            return Err(anyhow::anyhow!("IMDB is in source_preference but is not enabled"));
-                        }
-                    } else {
-                        return Err(anyhow::anyhow!("IMDB is in source_preference but is not configured"));
+                    let imdb = self.sources.imdb.as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("IMDB is in source_preference but is not configured"))?;
+                    if !imdb.enabled {
+                        return Err(anyhow::anyhow!("IMDB is in source_preference but is not enabled"));
                     }
                 }
                 "plex" => {
-                    if let Some(ref plex) = self.sources.plex {
-                        if !plex.enabled {
-                            return Err(anyhow::anyhow!("Plex is in source_preference but is not enabled"));
-                        }
-                    } else {
-                        return Err(anyhow::anyhow!("Plex is in source_preference but is not configured"));
+                    let plex = self.sources.plex.as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("Plex is in source_preference but is not configured"))?;
+                    if !plex.enabled {
+                        return Err(anyhow::anyhow!("Plex is in source_preference but is not enabled"));
                     }
                 }
-                _ => {
-                    // Already validated above
-                }
+                _ => {}
             }
         }
         
@@ -433,17 +432,18 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
     use tempfile::NamedTempFile;
 
     #[test]
     fn test_config_load_and_save() {
         let file = NamedTempFile::new().unwrap();
         let config = Config {
-            trakt: TraktConfig {
+            trakt: Some(TraktConfig {
+                enabled: true,
                 client_id: "test_id".to_string(),
                 client_secret: "test_secret".to_string(),
-            },
+                status_mapping: default_trakt_status_mapping(),
+            }),
             simkl: None,
             resolution: ResolutionConfig {
                 source_preference: vec!["trakt".to_string()],
@@ -471,8 +471,8 @@ mod tests {
         config.save_to_file(&path).unwrap();
 
         let loaded = Config::load_from_file(&path).unwrap();
-        assert_eq!(loaded.trakt.client_id, "test_id");
-        assert_eq!(loaded.trakt.client_secret, "test_secret");
+        assert_eq!(loaded.trakt.as_ref().unwrap().client_id, "test_id");
+        assert_eq!(loaded.trakt.as_ref().unwrap().client_secret, "test_secret");
         assert_eq!(loaded.sync.sync_watchlist, true);
         assert_eq!(loaded.sync.sync_reviews, false);
     }
@@ -480,10 +480,12 @@ mod tests {
     #[test]
     fn test_config_validate() {
         let mut config = Config {
-            trakt: TraktConfig {
+            trakt: Some(TraktConfig {
+                enabled: true,
                 client_id: "YOUR_CLIENT_ID".to_string(),
                 client_secret: "YOUR_CLIENT_SECRET".to_string(),
-            },
+                status_mapping: default_trakt_status_mapping(),
+            }),
             simkl: None,
             resolution: ResolutionConfig {
                 source_preference: vec!["trakt".to_string()],

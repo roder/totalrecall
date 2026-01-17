@@ -19,9 +19,6 @@ pub async fn generate_exports(
     // Generate watchlist export if needed
     if sync_watchlist || remove_watched_from_watchlists {
         let _export_generated = generate_watchlist_export(&page).await?;
-        // Note: We don't use the return value here because generate_exports is called
-        // from multiple places and we want to maintain backward compatibility.
-        // The empty check is handled in get_watchlist() instead.
     }
 
     // Generate ratings export if needed
@@ -59,7 +56,7 @@ async fn is_watchlist_empty(page: &Page) -> Result<bool> {
     }
     
     // Also check for the specific empty state element by class
-    // Note: The class "sc-b9995ff0-4" may be dynamically generated, so we verify text content
+    // The class may be dynamically generated, so we verify text content
     let empty_selectors = [
         ".sc-b9995ff0-4",  // The specific class for empty state
         "[data-testid='empty-watchlist']",

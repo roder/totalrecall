@@ -361,7 +361,7 @@ async fn configure_trakt(client_id_arg: Option<String>, client_secret_arg: Optio
                 mark_rated_as_watched: false,
                 remove_watchlist_items_older_than_days: None,
             },
-            scheduler: None,
+            scheduler: Some(media_sync_config::default_scheduler_config()),
         };
         default_config
     };
@@ -376,7 +376,6 @@ async fn configure_trakt(client_id_arg: Option<String>, client_secret_arg: Optio
     ], output);
     output.println("");
 
-    // Initialize Trakt config if it doesn't exist
     if config.trakt.is_none() {
         config.trakt = Some(TraktConfig {
             enabled: true,
@@ -387,8 +386,6 @@ async fn configure_trakt(client_id_arg: Option<String>, client_secret_arg: Optio
         });
     }
     let trakt_config = config.trakt.as_mut().unwrap();
-
-    // Get client ID
     let client_id = if let Some(id) = client_id_arg {
         id
     } else if !trakt_config.client_id.is_empty()
@@ -561,7 +558,7 @@ async fn configure_simkl(client_id_arg: Option<String>, client_secret_arg: Optio
                 mark_rated_as_watched: false,
                 remove_watchlist_items_older_than_days: None,
             },
-            scheduler: None,
+            scheduler: Some(media_sync_config::default_scheduler_config()),
         };
         default_config
     };
@@ -575,11 +572,10 @@ async fn configure_simkl(client_id_arg: Option<String>, client_secret_arg: Optio
         "No redirect URI is needed - we use device PIN authentication",
     ], output);
     output.println("");
-    output.println("Note: During authentication, you'll be shown a PIN code.");
+    output.println("During authentication, you'll be shown a PIN code.");
     output.println("Visit the provided URL and enter the PIN to complete authorization.");
     output.println("");
 
-    // Get client ID
     let client_id = if let Some(id) = client_id_arg {
         id
     } else if let Some(ref simkl_config) = config.simkl {
@@ -743,7 +739,7 @@ async fn configure_imdb(username_arg: Option<String>, output: &Output) -> Result
                 mark_rated_as_watched: false,
                 remove_watchlist_items_older_than_days: None,
             },
-            scheduler: None,
+            scheduler: Some(media_sync_config::default_scheduler_config()),
         };
         default_config
     };
@@ -751,7 +747,6 @@ async fn configure_imdb(username_arg: Option<String>, output: &Output) -> Result
     print_section_header("IMDB Credentials Setup", output);
     output.println("");
 
-    // Get username
     let username = if let Some(user) = username_arg {
         user
     } else {
@@ -862,7 +857,7 @@ async fn configure_plex(token_arg: Option<String>, server_url_arg: Option<String
                 mark_rated_as_watched: false,
                 remove_watchlist_items_older_than_days: None,
             },
-            scheduler: None,
+            scheduler: Some(media_sync_config::default_scheduler_config()),
         };
         default_config
     };
@@ -1060,7 +1055,7 @@ async fn configure_sync(
     };
 
     // Sync reviews
-    output.println("\nPlease note: reviews synced to IMDB will use 'My Review' as the title field.");
+    output.println("\nReviews synced to IMDB will use 'My Review' as the title field.");
     config.sync.sync_reviews = if let Some(val) = enable_reviews {
         val
     } else {
@@ -1314,7 +1309,7 @@ pub fn load_config_or_prompt_source_preference(output: &Output) -> Result<Config
 }
 
 /// Run interactive configuration wizard
-async fn run_interactive_config(output: &Output) -> Result<()> {
+pub async fn run_interactive_config(output: &Output) -> Result<()> {
     let path_manager = PathManager::default();
     let config_file = path_manager.config_file();
     
@@ -1373,7 +1368,7 @@ async fn run_interactive_config(output: &Output) -> Result<()> {
                 mark_rated_as_watched: false,
                 remove_watchlist_items_older_than_days: None,
             },
-            scheduler: None,
+            scheduler: Some(media_sync_config::default_scheduler_config()),
         }
     };
     

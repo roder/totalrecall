@@ -207,6 +207,5 @@ impl Hash for MediaIds {
         self.tvdb_id.hash(state);
         self.slug.hash(state);
         self.plex_rating_key.hash(state);
-        // Note: title, year, media_type are not included in hash for ID-based matching
     }
 }

@@ -523,8 +523,7 @@ impl IdLookupProvider for SimklClient {
         let access_token = self.access_token()
             .map_err(|e| Box::new(std::io::Error::new(std::io::ErrorKind::Other, format!("{}", e))) as Box<dyn std::error::Error + Send + Sync>)?;
         
-        // Note: Simkl doesn't have a public search API, so this will return None
-        // Do not use TMDB fallback as per plan requirements
+        // Simkl doesn't have a public search API, so this will return None
         api::search_by_title(&self.client, access_token, &self.client_id, title, year, media_type)
             .await
             .map_err(|e| Box::new(std::io::Error::new(std::io::ErrorKind::Other, format!("{}", e))) as Box<dyn std::error::Error + Send + Sync>)

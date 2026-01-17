@@ -2,6 +2,8 @@ use anyhow::Result;
 use media_sync_models::{MediaIds, MediaType};
 use media_sync_sources::{MediaSource, SourceError};
 use std::path::Path;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 use tracing::{debug, warn};
 use crate::id_cache::IdCache;
 use crate::id_cache_storage::IdCacheStorage;
@@ -50,9 +52,9 @@ pub struct IdResolver {
 }
 
 impl IdResolver {
-    pub fn new(
+    pub async fn new(
         cache_dir: &Path,
-        sources: &[Box<dyn MediaSource<Error = SourceError>>],
+        sources: &[Arc<RwLock<Box<dyn MediaSource<Error = SourceError>>>>],
         config: IdResolverConfig,
     ) -> Result<Self> {
         let storage = IdCacheStorage::new(cache_dir);
@@ -64,7 +66,7 @@ impl IdResolver {
             IdCache::new()
         };
         
-        let lookup_service = IdLookupService::new(sources);
+        let lookup_service = IdLookupService::new(sources).await;
         
         Ok(Self {
             cache,
@@ -84,7 +86,7 @@ impl IdResolver {
     /// 4. Updates cache
     pub async fn resolve_ids_for_item(
         &mut self,
-        sources: &[Box<dyn MediaSource<Error = SourceError>>],
+        sources: &[Arc<RwLock<Box<dyn MediaSource<Error = SourceError>>>>],
         title: &str,
         year: Option<u32>,
         media_type: &MediaType,
@@ -105,17 +107,17 @@ impl IdResolver {
         if ids.is_empty() || ids.imdb_id.is_none() {
             // Check persistent cache by title/year before doing external lookup
             if let Some(cached) = self.cache.find_by_title_year(title, year, media_type) {
-                debug!("ID resolver: Found '{}' (year: {:?}) in persistent cache by title/year, using cached IDs", title, year);
+                tracing::trace!("ID resolver: Found '{}' (year: {:?}) in persistent cache by title/year, using cached IDs", title, year);
                 return Ok((*cached).clone());
             }
             
             // Debug: Log why title/year lookup failed
             let index_size = self.cache.title_year_index_size();
             let cache_size = self.cache.len();
-            debug!("ID resolver: Title/year cache miss for '{}' (year: {:?}, type: {:?}). Cache has {} total entries, {} title/year indexed entries. Attempting external lookup.", 
+            tracing::trace!("ID resolver: Title/year cache miss for '{}' (year: {:?}, type: {:?}). Cache has {} total entries, {} title/year indexed entries. Attempting external lookup.", 
                    title, year, media_type, cache_size, index_size);
             
-            debug!("ID resolver: Attempting lookup for '{}' (year: {:?}, type: {:?})", title, year, media_type);
+            tracing::trace!("ID resolver: Attempting lookup for '{}' (year: {:?}, type: {:?})", title, year, media_type);
                 
                 // Collect detailed lookup information
                 let available_providers = self.lookup_service.available_providers();
@@ -126,7 +128,7 @@ impl IdResolver {
                     if looked_up_ids.is_empty() {
                         warn!("ID resolution for '{}' (year: {:?}) returned empty IDs. This may be because: 1) No lookup providers are available (check authentication), 2) The title was not found in any provider, or 3) The providers returned no IDs for this title.", 
                               title, year);
-                        debug!("ID resolver: Lookup returned empty MediaIds for '{}'. Queried {} provider(s): {:?}", 
+                        tracing::trace!("ID resolver: Lookup returned empty MediaIds for '{}'. Queried {} provider(s): {:?}", 
                                title, provider_count, available_providers);
                     } else {
                         // After external lookup, check if any of the returned IDs are already in cache
@@ -154,7 +156,7 @@ impl IdResolver {
                                 self.inserts_since_save += 1;
                                 ids = merged;
                                 cached_ids_found = true;
-                                debug!("ID resolver: Found '{}' in cache (via imdb_id={}) after external lookup, updating with metadata", title, imdb);
+                                tracing::trace!("ID resolver: Found '{}' in cache (via imdb_id={}) after external lookup, updating with metadata", title, imdb);
                             }
                         }
                         
@@ -180,7 +182,7 @@ impl IdResolver {
                                     self.inserts_since_save += 1;
                                     ids = merged;
                                     cached_ids_found = true;
-                                    debug!("ID resolver: Found '{}' in cache (via trakt_id={}) after external lookup, updating with metadata", title, trakt_id);
+                                    tracing::trace!("ID resolver: Found '{}' in cache (via trakt_id={}) after external lookup, updating with metadata", title, trakt_id);
                                 }
                             }
                         }
@@ -206,7 +208,7 @@ impl IdResolver {
                                     self.inserts_since_save += 1;
                                     ids = merged;
                                     cached_ids_found = true;
-                                    debug!("ID resolver: Found '{}' in cache (via tmdb_id={}) after external lookup, updating with metadata", title, tmdb_id);
+                                    tracing::trace!("ID resolver: Found '{}' in cache (via tmdb_id={}) after external lookup, updating with metadata", title, tmdb_id);
                                 }
                             }
                         }
@@ -214,7 +216,7 @@ impl IdResolver {
                         if !cached_ids_found {
                             // Not in cache, use the looked up IDs
                             ids.merge(&looked_up_ids);
-                            debug!("ID resolution for '{}' found IDs: imdb={:?}, trakt={:?}, tmdb={:?}, tvdb={:?}", 
+                            tracing::trace!("ID resolution for '{}' found IDs: imdb={:?}, trakt={:?}, tmdb={:?}, tvdb={:?}", 
                                    title, looked_up_ids.imdb_id, looked_up_ids.trakt_id, looked_up_ids.tmdb_id, looked_up_ids.tvdb_id);
                         }
                     }
@@ -222,7 +224,7 @@ impl IdResolver {
                 Err(e) => {
                     warn!("ID lookup failed for '{}': {}. Queried {} provider(s): {:?}", 
                           title, e, provider_count, available_providers);
-                    debug!("ID resolver: Lookup error details for '{}': {:?}", title, e);
+                    tracing::trace!("ID resolver: Lookup error details for '{}': {:?}", title, e);
                 }
             }
         }
@@ -326,14 +328,14 @@ impl IdResolver {
     /// Queries external lookup services to find the title and year.
     pub async fn lookup_by_imdb_id(
         &mut self,
-        sources: &[Box<dyn MediaSource<Error = SourceError>>],
+        sources: &[Arc<RwLock<Box<dyn MediaSource<Error = SourceError>>>>],
         imdb_id: &str,
         media_type: &MediaType,
     ) -> Result<Option<(String, Option<u32>, MediaIds)>> {
         // First check cache
         if let Some(cached_ids) = self.cache.find_by_any_id(imdb_id) {
             if let (Some(title), year) = (cached_ids.title.clone(), cached_ids.year) {
-                debug!("ID reverse lookup: Found '{}' (year: {:?}) in cache for imdb_id={}", title, year, imdb_id);
+                tracing::trace!("ID reverse lookup: Found '{}' (year: {:?}) in cache for imdb_id={}", title, year, imdb_id);
                 return Ok(Some((title, year, (*cached_ids).clone())));
             }
         }
@@ -348,11 +350,11 @@ impl IdResolver {
                 self.cache.insert(ids.clone());
                 self.inserts_since_save += 1;
                 
-                debug!("ID reverse lookup: Found '{}' (year: {:?}) via external lookup for imdb_id={}", title, year, imdb_id);
+                tracing::trace!("ID reverse lookup: Found '{}' (year: {:?}) via external lookup for imdb_id={}", title, year, imdb_id);
                 Ok(Some((title, year, ids)))
             }
             Ok(None) => {
-                debug!("ID reverse lookup: No match found for imdb_id={}", imdb_id);
+                tracing::trace!("ID reverse lookup: No match found for imdb_id={}", imdb_id);
                 Ok(None)
             }
             Err(e) => {

@@ -13,6 +13,7 @@ pub struct SourceData {
     pub watch_history: Vec<WatchHistory>,
 }
 
+#[derive(Clone)]
 pub struct ResolvedData {
     pub watchlist: Vec<WatchlistItem>,
     pub ratings: Vec<Rating>,
@@ -278,7 +279,7 @@ fn resolve_watchlist(
                     if !found_match {
                         // Log items being added without matches (for debugging)
                         if item.ids.is_none() || item.ids.as_ref().map(|ids| ids.is_empty()).unwrap_or(true) {
-                            debug!("resolve_watchlist: Adding item without IDs (will be skipped in distribution): '{}' (year: {:?})", 
+                            tracing::trace!("resolve_watchlist: Adding item without IDs (will be skipped in distribution): '{}' (year: {:?})", 
                                    item.title, item.year);
                         }
                         all_items.push(item.clone());

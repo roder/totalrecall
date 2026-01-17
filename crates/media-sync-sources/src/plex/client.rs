@@ -1,6 +1,7 @@
 use crate::traits::MediaSource;
 use crate::capabilities::{RatingNormalization, CapabilityRegistry, StatusMapping, IncrementalSync, IdExtraction, IdLookupProvider};
 use crate::plex::api::{PlexHttpClient, MovieMetadata, ShowMetadata, WatchlistItem as ApiWatchlistItem, PlayHistoryItem, RatingItem, MetadataItem};
+use crate::ProgressTracker;
 use anyhow::Result;
 use chrono::Utc;
 use media_sync_models::{Rating, Review, WatchHistory, WatchlistItem, MediaType, NormalizedStatus, MediaIds};
@@ -8,7 +9,7 @@ use media_sync_config::StatusMapping as StatusMappingConfig;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, trace, warn};
 use async_trait::async_trait;
 
 pub struct PlexClient {
@@ -536,7 +537,7 @@ impl PlexClient {
                 }
             }
         } else {
-            warn!("Plex: Cannot search discover provider - no title available (ids.title: {:?}, fallback_title: {:?})", 
+            trace!("Plex: Cannot search discover provider - no title available (ids.title: {:?}, fallback_title: {:?})", 
                   ids.title.as_deref(), fallback_title);
         }
         
@@ -951,14 +952,13 @@ impl MediaSource for PlexClient {
                    item.title, item.rating_key, has_imdb_id, item.guids.len());
             
             // If item has no IMDB ID, try to look it up from the server
-            // Note: Discovery API rating_key is often a GUID (plex://movie/...), not a server rating_key
-            // So we'll search by title/year instead of trying to use the rating_key directly
+            // Discovery API rating_key is often a GUID, so we search by title/year instead
             let mut item_with_guids = item.clone();
             if !has_imdb_id {
-                info!("Plex watchlist: Item '{}' (rating_key: {}) has no IMDB ID, attempting lookup", 
+                trace!("Plex watchlist: Item '{}' (rating_key: {}) has no IMDB ID, attempting lookup", 
                       item_with_guids.title, item_with_guids.rating_key);
                 if let Some(ref server_url) = server_url {
-                    info!("Plex watchlist: Item '{}' (rating_key: {}) has no IMDB ID in GUIDs, searching server by title/year", 
+                    trace!("Plex watchlist: Item '{}' (rating_key: {}) has no IMDB ID in GUIDs, searching server by title/year", 
                            item_with_guids.title, item_with_guids.rating_key);
                     
                     // Check if rating_key looks like a server rating_key (numeric or /library/metadata/...)
@@ -984,7 +984,7 @@ impl MediaSource for PlexClient {
                             }
                         }
                     } else {
-                        info!("Plex watchlist: Rating_key '{}' appears to be a GUID (Discovery API format), skipping direct lookup, will search by title/year", 
+                        trace!("Plex watchlist: Rating_key '{}' appears to be a GUID (Discovery API format), skipping direct lookup, will search by title/year", 
                                item_with_guids.rating_key);
                     }
                     
@@ -994,11 +994,11 @@ impl MediaSource for PlexClient {
                                item_with_guids.title, item_with_guids.rating_key);
                         
                         // Try to find the item in server libraries by title/year
-                        info!("Plex watchlist: Searching server libraries for '{}' (year: {:?})", 
+                        trace!("Plex watchlist: Searching server libraries for '{}' (year: {:?})", 
                               item_with_guids.title, item_with_guids.year);
                         match client.get_libraries(server_url).await {
                             Ok(libraries) => {
-                                info!("Plex watchlist: Found {} libraries to search", libraries.len());
+                                trace!("Plex watchlist: Found {} libraries to search", libraries.len());
                                 let mut found = false;
                                 for library in libraries {
                                 if library.type_ == "movie" {
@@ -1036,7 +1036,7 @@ impl MediaSource for PlexClient {
                                         };
                                         
                                         if title_match && year_match {
-                                            info!("Plex watchlist: Found matching movie '{}' (year: {:?}) in library, found {} GUIDs", 
+                                            trace!("Plex watchlist: Found matching movie '{}' (year: {:?}) in library, found {} GUIDs", 
                                                    movie.title, movie.year, movie.guids.len());
                                             item_with_guids.guids = movie.guids;
                                             found = true;
@@ -1091,13 +1091,13 @@ impl MediaSource for PlexClient {
                                 }
                             }
                             if !found {
-                                info!("Plex watchlist: Could not find matching item '{}' (year: {:?}) in any server library, trying search API", 
+                                trace!("Plex watchlist: Could not find matching item '{}' (year: {:?}) in any server library, trying search API", 
                                        item_with_guids.title, item_with_guids.year);
                                 
                                 // Fallback: Use Plex search API to find the item
                                 match client.search_by_title(server_url, &item_with_guids.title, item_with_guids.year, &item_with_guids.type_).await {
                                     Ok(search_results) => {
-                                        info!("Plex watchlist: Search API returned {} results for '{}'", search_results.len(), item_with_guids.title);
+                                        trace!("Plex watchlist: Search API returned {} results for '{}'", search_results.len(), item_with_guids.title);
                                         // Find the best match (exact title match, prefer year match if available)
                                         let mut best_match: Option<&MetadataItem> = None;
                                         for result in &search_results {
@@ -1110,18 +1110,18 @@ impl MediaSource for PlexClient {
                                             }
                                         }
                                         if let Some(match_result) = best_match {
-                                            info!("Plex watchlist: Search API found exact match '{}' with {} GUIDs", 
+                                            trace!("Plex watchlist: Search API found exact match '{}' with {} GUIDs", 
                                                   match_result.title, match_result.guids.len());
                                             item_with_guids.guids = match_result.guids.clone();
                                             found = true;
                                         } else if !search_results.is_empty() {
                                             // Use first result even if title doesn't match exactly (fuzzy match)
-                                            info!("Plex watchlist: Using first search result '{}' (title doesn't match exactly) with {} GUIDs", 
+                                            trace!("Plex watchlist: Using first search result '{}' (title doesn't match exactly) with {} GUIDs", 
                                                    search_results[0].title, search_results[0].guids.len());
                                             item_with_guids.guids = search_results[0].guids.clone();
                                             found = true;
                                         } else {
-                                            warn!("Plex watchlist: Search API returned no results for '{}', trying TMDB lookup", item_with_guids.title);
+                                            trace!("Plex watchlist: Search API returned no results for '{}', trying TMDB lookup", item_with_guids.title);
                                             
                                             // Final fallback: Use TMDB API to look up IMDB ID by title/year
                                             if let Some(imdb_id) = Self::lookup_imdb_id_via_tmdb(&item_with_guids.title, item_with_guids.year).await {
@@ -1182,11 +1182,9 @@ impl MediaSource for PlexClient {
                 self.cache_imdb_to_rating_key(watchlist_item.imdb_id.clone(), item_with_guids.rating_key.clone()).await;
             } else {
                 items_without_imdb += 1;
-                if items_without_imdb <= 5 {
-                    warn!("Plex watchlist item has no IMDB ID (rating_key: '{}', title: '{}', GUIDs: {:?})", 
-                           item_with_guids.rating_key, item_with_guids.title,
-                           item_with_guids.guids.iter().map(|g| &g.id).collect::<Vec<_>>());
-                }
+                trace!("Plex watchlist item has no IMDB ID (rating_key: '{}', title: '{}', GUIDs: {:?}) - will be resolved later", 
+                       item_with_guids.rating_key, item_with_guids.title,
+                       item_with_guids.guids.iter().map(|g| &g.id).collect::<Vec<_>>());
             }
             
             // Always add to watchlist, even without IMDB ID - cache should contain all data
@@ -1302,7 +1300,7 @@ impl MediaSource for PlexClient {
             warn!("Plex watch history: {} items were filtered out (unsupported media types like 'track')", items_filtered);
         }
         
-        // Save excluded items to cache
+        // Save excluded items to cache (collect phase - unsupported media types)
         let excluded_raw = self.get_excluded_items().await;
         if !excluded_raw.is_empty() {
             use media_sync_config::PathManager;
@@ -1311,8 +1309,8 @@ impl MediaSource for PlexClient {
             use std::fs;
             
             let path_manager = PathManager::default();
-            let cache_dir = path_manager.cache_dir();
-            let excluded_path = cache_dir.join("plex_excluded.json"); // Matches CacheManager pattern: {source}_{data_type}.json
+            // Excluded items from collect phase go to cache/collect/plex/excluded.json
+            let excluded_path = path_manager.cache_collect_dir().join("plex").join("excluded.json");
             
             let excluded: Vec<ExcludedItem> = excluded_raw
                 .into_iter()
@@ -1326,6 +1324,13 @@ impl MediaSource for PlexClient {
                     date_added: None, // Not a watchlist item, so no date_added
                 })
                 .collect();
+            
+            // Ensure parent directory exists
+            if let Some(parent) = excluded_path.parent() {
+                if let Err(e) = fs::create_dir_all(parent) {
+                    warn!("Failed to create directory for Plex excluded items cache: {}", e);
+                }
+            }
             
             // Save excluded items to JSON file
             if let Ok(json) = serde_json::to_string_pretty(&excluded) {
@@ -1356,10 +1361,17 @@ impl MediaSource for PlexClient {
         let client = self.get_api_client().await
             .map_err(|e| crate::error::SourceError::new(format!("{}", e)))?;
         
+        if items.is_empty() {
+            return Ok(());
+        }
+
+        let progress_interval = if items.len() < 50 { 10 } else { 50 };
+        let mut tracker = ProgressTracker::new(items.len(), progress_interval);
         let mut added_count = 0;
         let mut not_found_count = 0;
         
-        for item in items {
+        for (idx, item) in items.iter().enumerate() {
+            let current = idx + 1;
             // Try to get rating_key from MediaIds (checks plex_rating_key first, then tries imdb, tmdb, tvdb, then discover provider)
             // For watchlist operations, we need discover provider metadata keys, not local server keys
             let rating_key = if let Some(ref media_ids) = item.ids {
@@ -1384,24 +1396,28 @@ impl MediaSource for PlexClient {
             
             if let Some(rating_key) = rating_key {
                 // Media Provider watchlist endpoint uses ratingKey parameter
-                client.add_to_watchlist(&rating_key).await
-                    .map_err(|e| crate::error::SourceError::new(format!("Failed to add '{}' to Plex watchlist: {}", item.title, e)))?;
-                info!("Added '{}' to Plex watchlist (rating_key: {})", item.title, rating_key);
-                added_count += 1;
+                match client.add_to_watchlist(&rating_key).await {
+                    Ok(_) => {
+                        trace!("Added '{}' to Plex watchlist (rating_key: {})", item.title, rating_key);
+                        tracker.record_added();
+                        added_count += 1;
+                    }
+                    Err(e) => {
+                        warn!("Failed to add '{}' to Plex watchlist: {}", item.title, e);
+                        tracker.record_failed_with_error("Plex: add_to_watchlist_api_error");
+                    }
+                }
             } else {
                 warn!("Could not find Plex rating_key for '{}' (ids.title: {:?}) - item may not be in Plex library or discover provider", 
                       item.title, item.ids.as_ref().and_then(|ids| ids.title.as_ref()));
+                tracker.record_failed_with_error("Plex: rating_key_not_found");
                 not_found_count += 1;
             }
+
+            tracker.log_progress(current);
         }
         
-        if added_count == 0 && !items.is_empty() {
-            warn!("No items were added to Plex watchlist: {} items attempted, {} not found", 
-                  items.len(), not_found_count);
-        } else if added_count > 0 {
-            info!("Successfully added {} items to Plex watchlist ({} not found)", added_count, not_found_count);
-        }
-        
+        tracker.log_summary("Plex watchlist add");
         Ok(())
     }
 
@@ -1412,7 +1428,15 @@ impl MediaSource for PlexClient {
         let client = self.get_api_client().await
             .map_err(|e| crate::error::SourceError::new(format!("{}", e)))?;
         
-        for item in items {
+        if items.is_empty() {
+            return Ok(());
+        }
+
+        let progress_interval = if items.len() < 50 { 10 } else { 50 };
+        let mut tracker = ProgressTracker::new(items.len(), progress_interval);
+        
+        for (idx, item) in items.iter().enumerate() {
+            let current = idx + 1;
             // Try to get rating_key from MediaIds (checks plex_rating_key first, then tries imdb, tmdb, tvdb, then discover provider)
             // For watchlist operations, we need discover provider metadata keys, not local server keys
             let rating_key = if let Some(ref media_ids) = item.ids {
@@ -1436,14 +1460,25 @@ impl MediaSource for PlexClient {
             };
             
             if let Some(rating_key) = rating_key {
-                client.remove_from_watchlist(&rating_key).await
-                    .map_err(|e| crate::error::SourceError::new(format!("Failed to remove '{}' from Plex watchlist: {}", item.title, e)))?;
-                info!("Removed '{}' ({}) from Plex watchlist", item.title, item.imdb_id);
+                match client.remove_from_watchlist(&rating_key).await {
+                    Ok(_) => {
+                        trace!("Removed '{}' ({}) from Plex watchlist", item.title, item.imdb_id);
+                        tracker.record_added();
+                    }
+                    Err(e) => {
+                        warn!("Failed to remove '{}' from Plex watchlist: {}", item.title, e);
+                        tracker.record_failed_with_error("Plex: remove_from_watchlist_api_error");
+                    }
+                }
             } else {
                 warn!("Could not find Plex rating_key for '{}' (IMDB: {}) - item may not be in Plex library or discover provider", item.title, item.imdb_id);
+                tracker.record_failed_with_error("Plex: rating_key_not_found");
             }
+
+            tracker.log_progress(current);
         }
         
+        tracker.log_summary("Plex watchlist remove");
         Ok(())
     }
 
@@ -1454,9 +1489,17 @@ impl MediaSource for PlexClient {
         let client = self.get_api_client().await
             .map_err(|e| crate::error::SourceError::new(format!("{}", e)))?;
         
-        for rating in ratings {
+        if ratings.is_empty() {
+            return Ok(());
+        }
+
+        let progress_interval = if ratings.len() < 50 { 10 } else { 50 };
+        let mut tracker = ProgressTracker::new(ratings.len(), progress_interval);
+        
+        for (idx, rating) in ratings.iter().enumerate() {
+            let current = idx + 1;
             // Try to get rating_key from MediaIds (tries imdb, tmdb, tvdb in order)
-            // Note: Rating doesn't have title/year/media_type fields, so we pass None for fallback
+            // Rating doesn't have title/year/media_type fields, so we pass None for fallback
             // require_discover_provider_key=false because ratings can use local server keys
             let rating_key = if let Some(ref media_ids) = rating.ids {
                 self.get_rating_key_from_media_ids(media_ids, &server_url, None, None, None, false).await
@@ -1470,17 +1513,39 @@ impl MediaSource for PlexClient {
             };
             
             if let Some(rating_key) = rating_key {
-                // Convert from 1-10 scale to 0.0-10.0 (Plex uses 0.0-10.0)
-                let rating_value = rating.rating as f64;
+                // Detect if this is a Discover provider key (long hex string, 20+ chars) 
+                // vs local library key (short numeric, typically < 10 chars)
+                let is_discover_key = rating_key.len() >= 20 && rating_key.chars().all(|c| c.is_ascii_hexdigit());
                 
-                client.set_rating(&server_url, &rating_key, rating_value).await
-                    .map_err(|e| crate::error::SourceError::new(format!("Failed to set rating: {}", e)))?;
-                info!("Set rating {} on Plex", rating.rating);
+                if is_discover_key {
+                    // Discover provider keys don't work with local server rating endpoint (produces 500 errors)
+                    // Skip silently to avoid noise, but track as skipped
+                    trace!("Skipping rating for Discover provider item (rating_key={}): not supported by local server rating endpoint", rating_key);
+                    tracker.record_skipped();
+                } else {
+                    // Convert from 1-10 scale to 0.0-10.0 (Plex uses 0.0-10.0)
+                    let rating_value = rating.rating as f64;
+                    
+                    match client.set_rating(&server_url, &rating_key, rating_value).await {
+                        Ok(_) => {
+                            trace!("Set rating {} on Plex", rating.rating);
+                            tracker.record_added();
+                        }
+                        Err(e) => {
+                            warn!("Failed to set rating: {}", e);
+                            tracker.record_failed_with_error("Plex: set_rating_api_error");
+                        }
+                    }
+                }
             } else {
                 warn!("Could not find Plex rating_key for rating - item may not be in Plex library");
+                tracker.record_failed_with_error("Plex: rating_key_not_found");
             }
+
+            tracker.log_progress(current);
         }
         
+        tracker.log_summary("Plex ratings set");
         Ok(())
     }
 
@@ -1561,13 +1626,18 @@ impl MediaSource for PlexClient {
         let client = self.get_api_client().await
             .map_err(|e| crate::error::SourceError::new(format!("{}", e)))?;
         
-        info!("Plex: Starting to process {} watch history items", items.len());
-        
+        if items.is_empty() {
+            return Ok(());
+        }
+
+        let progress_interval = if items.len() < 50 { 10 } else { 50 };
+        let mut tracker = ProgressTracker::new(items.len(), progress_interval);
         let mut success_count = 0;
         let mut not_found_count = 0;
         let mut error_count = 0;
         
         for (idx, item) in items.iter().enumerate() {
+            let current = idx + 1;
             // Try to get the best available title: prefer item.title, then ids.title
             let title = item.title.as_deref()
                 .or_else(|| item.ids.as_ref().and_then(|ids| ids.title.as_deref()));
@@ -1576,8 +1646,8 @@ impl MediaSource for PlexClient {
             let year = item.year
                 .or_else(|| item.ids.as_ref().and_then(|ids| ids.year));
             
-            info!("Plex: Processing watch history item {}/{}: imdb_id={}, title={:?}, year={:?}, media_type={:?}",
-                  idx + 1, items.len(), item.imdb_id, title, year, item.media_type);
+            trace!("Plex: Processing watch history item {}/{}: imdb_id={}, title={:?}, year={:?}, media_type={:?}",
+                  current, items.len(), item.imdb_id, title, year, item.media_type);
             
             // Try to get rating_key from MediaIds (checks plex_rating_key first, then tries imdb, tmdb, tvdb, then discover provider)
             // require_discover_provider_key=true because mark_watched uses discover provider API
@@ -1605,31 +1675,44 @@ impl MediaSource for PlexClient {
             };
             
             if let Some(rating_key) = rating_key {
-                info!("Plex: Found rating_key '{}' for imdb_id={}, calling mark_watched", rating_key, item.imdb_id);
+                trace!("Plex: Found rating_key '{}' for imdb_id={}, calling mark_watched", rating_key, item.imdb_id);
                 // Use Timeline API scrobble endpoint (PUT /:/scrobble?identifier={identifier}&key={key})
                 // This works for both local library items and discover provider items
                 match client.mark_watched(&server_url, &rating_key).await {
                     Ok(_) => {
-                        info!("Plex: Successfully marked '{}' (imdb_id={}) as watched on Plex", 
+                        trace!("Plex: Successfully marked '{}' (imdb_id={}) as watched on Plex", 
                               title.unwrap_or("unknown"), item.imdb_id);
+                        tracker.record_added();
                         success_count += 1;
                     }
                     Err(e) => {
-                        warn!("Plex: Failed to mark '{}' (imdb_id={}) as watched on Plex: {}", 
-                              title.unwrap_or("unknown"), item.imdb_id, e);
+                        // Check if this is a local library item (short numeric rating_key)
+                        // Local library items should warn, Discover items should trace
+                        let is_local_library = rating_key.len() < 20 && rating_key.parse::<u32>().is_ok();
+                        if is_local_library {
+                            warn!("Plex: Failed to mark '{}' (imdb_id={}) as watched on Plex (local library item): {}", 
+                                  title.unwrap_or("unknown"), item.imdb_id, e);
+                            tracker.record_failed_with_error("Plex: mark_watched_api_error");
+                        } else {
+                            trace!("Plex: Failed to mark '{}' (imdb_id={}) as watched on Plex (discover item, expected to fail): {}", 
+                                  title.unwrap_or("unknown"), item.imdb_id, e);
+                            tracker.record_failed_with_error("Plex: mark_watched_discover_failed");
+                        }
                         error_count += 1;
                         // Continue processing other items instead of returning
                     }
                 }
             } else {
-                warn!("Plex: Could not find rating_key for '{}' (imdb_id={}, title={:?}, year={:?}) - item may not be in Plex library or discover provider", 
+                trace!("Plex: Could not find rating_key for '{}' (imdb_id={}, title={:?}, year={:?}) - item may not be in Plex library or discover provider (expected for items from other sources)", 
                       item.imdb_id, item.imdb_id, title, year);
+                tracker.record_failed_with_error("Plex: rating_key_not_found");
                 not_found_count += 1;
             }
+
+            tracker.log_progress(current);
         }
         
-        info!("Plex: Completed processing watch history: {} total items, {} succeeded, {} failed (not found), {} failed (API error)", 
-              items.len(), success_count, not_found_count, error_count);
+        tracker.log_summary("Plex watch history add");
         
         // Return error only if ALL items failed
         if success_count == 0 && items.len() > 0 {

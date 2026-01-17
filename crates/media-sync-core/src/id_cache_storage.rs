@@ -108,6 +108,11 @@ impl IdCacheStorage {
     pub fn save(&self, cache: &IdCache) -> Result<()> {
         let start = std::time::Instant::now();
         
+        // Ensure parent directory exists
+        if let Some(parent) = self.cache_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        
         // Get all entries for serialization
         let entries = cache.all_entries();
         

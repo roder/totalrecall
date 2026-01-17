@@ -1,6 +1,8 @@
 use anyhow::Result;
 use media_sync_models::{MediaIds, MediaType};
 use media_sync_sources::{MediaSource, SourceError};
+use std::sync::Arc;
+use tokio::sync::RwLock;
 use tracing::{debug, warn};
 
 /// Aggregator service that queries multiple ID lookup providers
@@ -15,11 +17,12 @@ pub struct IdLookupService {
 
 impl IdLookupService {
     /// Create a new lookup service from available sources
-    pub fn new(sources: &[Box<dyn MediaSource<Error = SourceError>>]) -> Self {
+    pub async fn new(sources: &[Arc<RwLock<Box<dyn MediaSource<Error = SourceError>>>>]) -> Self {
         let mut providers: Vec<(String, u8)> = Vec::new();
         
         for source in sources {
-            if let Some(provider) = source.as_id_lookup_provider() {
+            let source_guard = source.read().await;
+            if let Some(provider) = source_guard.as_id_lookup_provider() {
                 if provider.is_lookup_available() {
                     providers.push((
                         provider.lookup_provider_name().to_string(),
@@ -63,7 +66,7 @@ impl IdLookupService {
     /// Merged MediaIds from all providers that found matches
     pub async fn lookup_ids(
         &self,
-        sources: &[Box<dyn MediaSource<Error = SourceError>>],
+        sources: &[Arc<RwLock<Box<dyn MediaSource<Error = SourceError>>>>],
         title: &str,
         year: Option<u32>,
         media_type: &MediaType,
@@ -79,39 +82,50 @@ impl IdLookupService {
             return Ok(merged_ids);
         }
         
-        debug!("ID lookup: Attempting lookup for '{}' (year: {:?}, type: {:?}) using {} provider(s): {:?}", 
+        tracing::trace!("ID lookup: Attempting lookup for '{}' (year: {:?}, type: {:?}) using {} provider(s): {:?}", 
                title, year, media_type, self.providers.len(),
                self.providers.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>());
         
         // Query providers in priority order
         for (provider_name, _priority) in &self.providers {
             // Find the source that provides this lookup
-            if let Some(source) = sources.iter().find(|s| s.source_name() == provider_name.as_str()) {
-                if let Some(provider) = source.as_id_lookup_provider() {
-                    match provider.lookup_ids(title, year, media_type).await {
-                        Ok(Some(ids)) => {
-                            debug!("ID lookup via {} found IDs: imdb={:?}, trakt={:?}, tmdb={:?}", 
-                                   provider_name, ids.imdb_id, ids.trakt_id, ids.tmdb_id);
-                            merged_ids.merge(&ids);
-                            
-                            // Early exit if we have imdb_id (high confidence)
-                            if merged_ids.imdb_id.is_some() {
-                                break;
+            let mut found = false;
+            for source_arc in sources {
+                let source_guard = source_arc.read().await;
+                if source_guard.source_name() == provider_name.as_str() {
+                    if let Some(provider) = source_guard.as_id_lookup_provider() {
+                        match provider.lookup_ids(title, year, media_type).await {
+                            Ok(Some(ids)) => {
+                                tracing::trace!("ID lookup via {} found IDs: imdb={:?}, trakt={:?}, tmdb={:?}", 
+                                       provider_name, ids.imdb_id, ids.trakt_id, ids.tmdb_id);
+                                merged_ids.merge(&ids);
+                                
+                                // Early exit if we have imdb_id (high confidence)
+                                if merged_ids.imdb_id.is_some() {
+                                    found = true;
+                                    break;
+                                }
+                            }
+                            Ok(None) => {
+                                // No matches - this is normal, don't log
+                            }
+                            Err(e) => {
+                                warn!("ID lookup via {} failed for '{}' (year: {:?}): {}", 
+                                      provider_name, title, year, e);
+                                errors.push(format!("{}: {}", provider_name, e));
                             }
                         }
-                        Ok(None) => {
-                            // No matches - this is normal, don't log
-                        }
-                        Err(e) => {
-                            warn!("ID lookup via {} failed for '{}' (year: {:?}): {}", 
-                                  provider_name, title, year, e);
-                            errors.push(format!("{}: {}", provider_name, e));
-                        }
+                    } else {
+                        warn!("ID lookup: Source '{}' does not provide IdLookupProvider trait", provider_name);
                     }
-                } else {
-                    warn!("ID lookup: Source '{}' does not provide IdLookupProvider trait", provider_name);
+                    found = true;
+                    break;
                 }
-            } else {
+            }
+            if found && merged_ids.imdb_id.is_some() {
+                break;
+            }
+            if !found {
                 warn!("ID lookup: Could not find source '{}' in sources list", provider_name);
             }
         }
@@ -146,7 +160,7 @@ impl IdLookupService {
     /// * `Ok(None)` - No match found
     pub async fn lookup_by_imdb_id(
         &self,
-        sources: &[Box<dyn MediaSource<Error = SourceError>>],
+        sources: &[Arc<RwLock<Box<dyn MediaSource<Error = SourceError>>>>],
         imdb_id: &str,
         media_type: &MediaType,
     ) -> Result<Option<(String, Option<u32>, MediaIds)>> {
@@ -156,30 +170,34 @@ impl IdLookupService {
             return Ok(None);
         }
         
-        debug!("ID reverse lookup: Attempting lookup for imdb_id={}, type={:?} using {} provider(s): {:?}", 
+        tracing::trace!("ID reverse lookup: Attempting lookup for imdb_id={}, type={:?} using {} provider(s): {:?}", 
                imdb_id, media_type, self.providers.len(),
                self.providers.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>());
         
         // Query providers in priority order
         for (provider_name, _priority) in &self.providers {
             // Find the source that provides this lookup
-            if let Some(source) = sources.iter().find(|s| s.source_name() == provider_name.as_str()) {
-                if let Some(provider) = source.as_id_lookup_provider() {
-                    match provider.lookup_by_imdb_id(imdb_id, media_type).await {
-                        Ok(Some((title, year, ids))) => {
-                            debug!("ID reverse lookup via {} found: title='{}', year={:?}, imdb={:?}, trakt={:?}, tmdb={:?}", 
-                                   provider_name, title, year, ids.imdb_id, ids.trakt_id, ids.tmdb_id);
-                            return Ok(Some((title, year, ids)));
-                        }
-                        Ok(None) => {
-                            // No matches - continue to next provider
-                        }
-                        Err(e) => {
-                            warn!("ID reverse lookup via {} failed for imdb_id={}: {}", 
-                                  provider_name, imdb_id, e);
-                            // Continue to next provider
+            for source_arc in sources {
+                let source_guard = source_arc.read().await;
+                if source_guard.source_name() == provider_name.as_str() {
+                    if let Some(provider) = source_guard.as_id_lookup_provider() {
+                        match provider.lookup_by_imdb_id(imdb_id, media_type).await {
+                            Ok(Some((title, year, ids))) => {
+                                tracing::trace!("ID reverse lookup via {} found: title='{}', year={:?}, imdb={:?}, trakt={:?}, tmdb={:?}", 
+                                       provider_name, title, year, ids.imdb_id, ids.trakt_id, ids.tmdb_id);
+                                return Ok(Some((title, year, ids)));
+                            }
+                            Ok(None) => {
+                                // No matches - continue to next provider
+                            }
+                            Err(e) => {
+                                warn!("ID reverse lookup via {} failed for imdb_id={}: {}", 
+                                      provider_name, imdb_id, e);
+                                // Continue to next provider
+                            }
                         }
                     }
+                    break; // Found the source, move to next provider
                 }
             }
         }

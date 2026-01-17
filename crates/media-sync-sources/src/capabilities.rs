@@ -22,9 +22,7 @@ pub trait CapabilityRegistry: Send + Sync {
     
     /// Check if this source supports the IncrementalSync capability
     fn supports_incremental_sync(&self) -> bool {
-        // Default implementation: try to get a reference (immutable check)
-        // This is a bit of a hack, but works for detection
-        false // Will be overridden by implementations that actually support it
+        false
     }
     
     /// Check if this source supports the RatingNormalization capability

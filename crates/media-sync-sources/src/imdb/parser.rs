@@ -1,10 +1,13 @@
 use anyhow::{anyhow, Result};
 use chrono::{NaiveDate, Utc};
-use csv::Reader;
-use media_sync_models::{MediaType, Rating, RatingSource, WatchHistory, WatchlistItem};
+use csv::{Reader, Writer};
+use media_sync_models::{MediaType, Rating, WatchHistory, WatchlistItem};
 use std::fs::File;
 use std::path::Path;
-use tracing::{self, debug};
+use tracing::{self, debug, info};
+
+#[cfg(test)]
+use media_sync_models::RatingSource;
 
 /// Parse IMDB watchlist CSV
 pub fn parse_watchlist_csv<P: AsRef<Path>>(path: P) -> Result<Vec<WatchlistItem>> {
@@ -240,6 +243,78 @@ pub fn parse_ratings_csv<P: AsRef<Path>>(path: P) -> Result<Vec<Rating>> {
 
     tracing::info!("Parsed {} total rows, {} valid ratings", row_count, ratings.len());
     Ok(ratings)
+}
+
+/// Generate IMDB ratings CSV from collected Rating data
+/// This creates a minimal CSV with available fields (some IMDB CSV fields like Title, Year may be missing)
+pub fn generate_ratings_csv<P: AsRef<Path>>(ratings: &[Rating], output_path: P) -> Result<()> {
+    use std::fs::File;
+    
+    let file = File::create(&output_path)?;
+    let mut writer = Writer::from_writer(file);
+    
+    // Write header matching IMDB ratings CSV format
+    writer.write_record(&[
+        "Position",
+        "Const",
+        "Created",
+        "Modified",
+        "Description",
+        "Title",
+        "Original Title",
+        "URL",
+        "Title Type",
+        "IMDb Rating",
+        "Runtime (mins)",
+        "Year",
+        "Genres",
+        "Num Votes",
+        "Release Date",
+        "Directors",
+        "Your Rating",
+        "Date Rated",
+    ])?;
+    
+    for (idx, rating) in ratings.iter().enumerate() {
+        // Map MediaType to Title Type string
+        let title_type = match rating.media_type {
+            MediaType::Movie => "Movie",
+            MediaType::Show => "TV Series",
+            MediaType::Episode { .. } => "TV Episode",
+        };
+        
+        // Format date as YYYY-MM-DD
+        let date_rated = rating.date_added.format("%Y-%m-%d").to_string();
+        
+        // Generate URL from IMDB ID
+        let url = format!("https://www.imdb.com/title/{}/", rating.imdb_id);
+        
+        // Write row with available data (empty fields for missing data)
+        writer.write_record(&[
+            (idx + 1).to_string(),           // Position
+            rating.imdb_id.clone(),          // Const (IMDB ID)
+            date_rated.clone(),              // Created
+            date_rated.clone(),              // Modified
+            String::new(),                   // Description
+            String::new(),                   // Title (not stored in Rating struct)
+            String::new(),                   // Original Title
+            url,                             // URL
+            title_type.to_string(),          // Title Type
+            String::new(),                   // IMDb Rating
+            String::new(),                   // Runtime (mins)
+            String::new(),                   // Year (not stored in Rating struct)
+            String::new(),                   // Genres
+            String::new(),                   // Num Votes
+            String::new(),                   // Release Date
+            String::new(),                   // Directors
+            rating.rating.to_string(),       // Your Rating
+            date_rated,                      // Date Rated
+        ])?;
+    }
+    
+    writer.flush()?;
+    info!("Generated IMDB ratings CSV with {} ratings to {:?}", ratings.len(), output_path.as_ref());
+    Ok(())
 }
 
 /// Parse IMDB check-ins CSV (watch history)

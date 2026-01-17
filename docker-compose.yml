@@ -8,21 +8,23 @@ services:
     container_name: totalrecall
     restart: unless-stopped
     volumes:
-      - ./config:/app/config:ro
-      - ./data:/app/data
-      - ./logs:/app/logs
+      # Mount entire base directory (config files at top level, data and logs in subdirs)
+      # Config files (config.toml, credentials.toml) go at top level
+      # Data directory: writable for cache and application data
+      # Logs directory: writable for application logs
+      - ./totalrecall:/app
     environment:
       - RUST_LOG=info
       - RUST_LOG_JSON=true
-      - LOG_FILE=/app/logs/totalrecall.log
-    command: ["daemon"]
+    command: ["start"]
     logging:
       driver: "json-file"
       options:
         max-size: "10m"
         max-file: "5"
     healthcheck:
-      test: ["CMD", "pgrep", "-f", "totalrecall daemon"]
+      # Check if the daemon process is running
+      test: ["CMD", "pgrep", "-f", "totalrecall start"]
       interval: 30s
       timeout: 10s
       retries: 3

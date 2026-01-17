@@ -129,9 +129,6 @@ impl ImdbClient {
             info!("Browser handler task ended");
         });
         
-        // Note: Download configuration will be done on the actual exports page
-        // when downloads are needed, not on a blank page
-        
         Ok(Self {
             browser: Some(browser),
             handler_task: Some(handler_task),
@@ -344,6 +341,15 @@ impl ImdbClient {
     
     /// Get user data directory for browser state persistence
     fn get_user_data_dir() -> Result<PathBuf> {
+        // If in container, use container data directory
+        use media_sync_config::container_base_path;
+        let container_base = container_base_path();
+        if container_base.exists() {
+            let user_data_dir = container_base.join("data").join("browser");
+            std::fs::create_dir_all(&user_data_dir)?;
+            return Ok(user_data_dir);
+        }
+        
         // Use dirs crate for platform-specific paths
         let base = dirs::data_dir()
             .or_else(|| dirs::home_dir().map(|h| h.join(".local/share")))
@@ -580,7 +586,7 @@ impl MediaSource for ImdbClient {
         let mut is_empty = page_text.contains("this list is empty");
         
         // Also check for the specific empty state element by class
-        // Note: The class "sc-b9995ff0-4" may be dynamically generated, so we verify text content
+        // The class may be dynamically generated, so we verify text content
         if !is_empty {
             let empty_selectors = [
                 ".sc-b9995ff0-4",  // The specific class for empty state
@@ -762,7 +768,7 @@ impl MediaSource for ImdbClient {
             // Cache CSV file BEFORE parsing (so we have it even if parsing fails)
             self.cache_csv_file(&path, "imdb_ratings.csv");
             
-            info!("Parsing ratings CSV from: {:?} (Note: CSV is downloaded fresh each sync to get latest data. Use --use-cache to skip download and use cached parsed data)", path);
+            info!("Parsing ratings CSV from: {:?}", path);
             
             // Count total rows in CSV for better logging
             let total_rows = match self.count_csv_rows(&path) {
@@ -864,7 +870,7 @@ impl MediaSource for ImdbClient {
             // Cache CSV file BEFORE parsing (so we have it even if parsing fails)
             self.cache_csv_file(&path, "imdb_checkins.csv");
             
-            info!("Parsing check-ins CSV from: {:?} (Note: CSV is downloaded fresh each sync to get latest data. Use --use-cache to skip download and use cached parsed data)", path);
+            info!("Parsing check-ins CSV from: {:?}", path);
             
             // Count total rows in CSV for better logging
             let total_rows = match self.count_csv_rows(&path) {

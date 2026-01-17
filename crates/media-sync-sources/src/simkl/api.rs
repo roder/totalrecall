@@ -693,6 +693,11 @@ pub async fn add_to_watchlist(
         return Err(anyhow!("Failed to add to watchlist: {} - {}", status, error_text));
     }
 
+    let total_items = movies.len() + shows.len();
+    if total_items > 0 {
+        tracing::info!("Added {} items to Simkl watchlist ({} movies, {} shows)", total_items, movies.len(), shows.len());
+    }
+
     Ok(())
 }
 
@@ -748,6 +753,9 @@ pub async fn remove_from_watchlist(
         let error_text = response.text().await.unwrap_or_default();
         return Err(anyhow!("Failed to remove from watchlist: {} - {}", status, error_text));
     }
+
+    let total_items = movies.len() + shows.len();
+    tracing::info!("Removed {} items from Simkl watchlist ({} movies, {} shows)", total_items, movies.len(), shows.len());
 
     Ok(())
 }
@@ -815,6 +823,9 @@ pub async fn set_ratings(
         return Err(anyhow!("Failed to set ratings: {} - {}", status, error_text));
     }
 
+    let total_items = movies.len() + shows.len();
+    tracing::info!("Set {} ratings on Simkl ({} movies, {} shows)", total_items, movies.len(), shows.len());
+
     Ok(())
 }
 
@@ -841,7 +852,7 @@ pub async fn add_watch_history(
     let mut shows = Vec::new();
 
     for item in items {
-        let mut item_obj = serde_json::json!({
+        let item_obj = serde_json::json!({
             "ids": {
                 "imdb": item.imdb_id
             },
@@ -876,11 +887,13 @@ pub async fn add_watch_history(
         return Err(anyhow!("Failed to add watch history: {} - {}", status, error_text));
     }
 
+    let total_items = movies.len() + shows.len();
+    tracing::info!("Added {} items to Simkl watch history ({} movies, {} shows)", total_items, movies.len(), shows.len());
+
     Ok(())
 }
 
 /// Search for media by title using Simkl API
-/// Note: Simkl may not have a public search API, so this may return None
 pub async fn search_by_title(
     _client: &Client,
     _access_token: &str,

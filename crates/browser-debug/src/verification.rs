@@ -1,4 +1,3 @@
-use anyhow::Result;
 use serde_json::Value;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -41,7 +40,6 @@ pub fn verify_action_result(
 pub fn compare_states(before: &Value, after: &Value) -> Value {
     let mut differences = serde_json::Map::new();
     
-    // Simple comparison - in a real implementation, this would be more sophisticated
     if before != after {
         differences.insert("changed".to_string(), Value::Bool(true));
         differences.insert("before".to_string(), before.clone());
@@ -92,5 +90,4 @@ pub fn verify_element_changed(
         )),
     }
 }
-
 

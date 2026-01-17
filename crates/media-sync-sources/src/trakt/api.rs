@@ -398,7 +398,6 @@ pub async fn get_comments(
         // According to Trakt API docs: /users/{username}/comments endpoint
         // The 'type' parameter filters comment types: 'all', 'reviews', 'shouts', 'lists'
         // Try 'reviews' first to get only reviews, fallback to 'all' if needed
-        // Note: API may have a delay in indexing newly added comments
         let url = format!(
             "https://api.trakt.tv/users/{}/comments?sort=newest&page={}&type=reviews",
             encoded_username, page

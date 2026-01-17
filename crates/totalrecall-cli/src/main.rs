@@ -1,6 +1,6 @@
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 use color_eyre::eyre::Context;
-use commands::{clear, config, daemon, sync};
+use commands::{clear, config, daemon as start, sync};
 
 mod commands;
 mod logging;
@@ -29,8 +29,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Sync data between sources (one-time sync)
-    #[command(long_about = "Synchronize watchlists, ratings, reviews, and watch history between configured sources. If no flags are specified, syncs all enabled data types from configuration.")]
+    /// Sync data between sources
     Sync {
         /// Sync watchlist items
         #[arg(long, action = ArgAction::SetTrue)]
@@ -67,9 +66,8 @@ enum Commands {
         #[arg(long, value_name = "SOURCES", num_args = 0..=1, default_missing_value = "all")]
         use_cache: Option<String>,
     },
-    /// Run as daemon with internal scheduler
-    #[command(long_about = "Run TotalRecall as a background daemon that periodically syncs data according to the configured schedule. The daemon will perform an initial sync on startup unless --no-startup-sync is specified.")]
-    Daemon {
+    /// Start the daemon with internal scheduler
+    Start {
         /// Cron schedule expression (e.g., '0 */6 * * *' for every 6 hours)
         #[arg(long, value_name = "SCHEDULE")]
         schedule: Option<String>,
@@ -82,14 +80,14 @@ enum Commands {
         #[arg(long, action = ArgAction::SetTrue)]
         foreground: bool,
     },
+    /// Stop the running daemon
+    Stop,
     /// Configure credentials and settings
-    #[command(long_about = "Manage configuration and credentials for TotalRecall. Use subcommands to view or modify settings for Trakt, IMDB, and sync options. Running without a subcommand starts the interactive configuration wizard.")]
     Config {
         #[command(subcommand)]
         cmd: Option<ConfigCommands>,
     },
     /// Clear cached data
-    #[command(long_about = "Clear cached data or stored credentials. Use --cache to clear application cache, --credentials to clear stored credentials, --timestamps to clear sync timestamps, or --all to clear everything.")]
     Clear {
         /// Clear all cache and credentials
         #[arg(long, action = ArgAction::SetTrue, conflicts_with = "credentials")]
@@ -112,7 +110,6 @@ enum Commands {
 #[derive(Subcommand)]
 enum ConfigCommands {
     /// Show current configuration (masks sensitive data)
-    #[command(long_about = "Display the current configuration. Sensitive data like passwords and tokens are masked. Use --full to show masked values.")]
     Show {
         /// Show full configuration including masked secrets
         #[arg(long, action = ArgAction::SetTrue)]
@@ -120,7 +117,6 @@ enum ConfigCommands {
     },
 
     /// Configure Trakt (OAuth flow)
-    #[command(long_about = "Configure Trakt API credentials and perform OAuth authentication. You'll need to create a Trakt API application at https://trakt.tv/oauth/applications first.")]
     Trakt {
         /// Trakt Client ID (if not provided, will prompt)
         #[arg(long)]
@@ -132,7 +128,6 @@ enum ConfigCommands {
     },
 
     /// Configure IMDB credentials
-    #[command(long_about = "Configure IMDB username and password. Credentials are stored securely in the credentials file.")]
     Imdb {
         /// IMDB Username (if not provided, will prompt)
         #[arg(long)]
@@ -140,7 +135,6 @@ enum ConfigCommands {
     },
 
     /// Configure Simkl (OAuth flow)
-    #[command(long_about = "Configure Simkl API credentials and perform OAuth authentication. You'll need to create a Simkl API application at https://simkl.com/oauth/applications first.")]
     Simkl {
         /// Simkl Client ID (if not provided, will prompt)
         #[arg(long)]
@@ -152,7 +146,6 @@ enum ConfigCommands {
     },
 
     /// Configure Plex (token-based authentication)
-    #[command(long_about = "Configure Plex API token for MyPlex cloud access. You can find your Plex token in your account settings or by inspecting network requests in Plex Web.")]
     Plex {
         /// Plex API Token (if not provided, will prompt)
         #[arg(long)]
@@ -164,11 +157,9 @@ enum ConfigCommands {
     },
 
     /// Interactive configuration wizard
-    #[command(long_about = "Run an interactive configuration wizard that guides you through setting up all services and preferences.")]
     Interactive,
 
     /// Configure sync options
-    #[command(long_about = "Configure which data types to sync and sync behavior options like removing watched items from watchlists.")]
     Sync {
         /// Enable watchlist syncing
         #[arg(long)]
@@ -194,11 +185,21 @@ async fn main() -> color_eyre::Result<()> {
     
     let cli = Cli::parse();
     
-    // Initialize logging with verbose level
-    logging::init_logging(cli.verbose, cli.quiet).map_err(|e| color_eyre::eyre::eyre!("{}", e))?;
-
     // Create output handler
     let output = output::Output::new(cli.output, cli.quiet);
+
+    // Determine if we need file logging (daemon mode, not foreground)
+    let log_file = match &cli.command {
+        Commands::Start { foreground: false, .. } => {
+            let path_manager = media_sync_config::PathManager::default();
+            Some(path_manager.daemon_log_file())
+        }
+        _ => None,
+    };
+
+    // Initialize logging (with file if daemon mode, otherwise stderr)
+    logging::init_logging_with_file(cli.verbose, cli.quiet, log_file)
+        .map_err(|e| color_eyre::eyre::eyre!("{}", e))?;
 
     match cli.command {
         Commands::Sync {
@@ -213,14 +214,15 @@ async fn main() -> color_eyre::Result<()> {
         } => {
             sync::run_sync(watchlist, ratings, reviews, watch_history, dry_run, all, use_cache, force_full_sync, &output).await
         }
-        Commands::Daemon {
+        Commands::Start {
             schedule,
             no_startup_sync,
             foreground,
         } => {
-            // Load config (prompt for source_preference if missing)
-            let config = commands::config::load_config_or_prompt_source_preference(&output)?;
-            daemon::run_daemon(config, schedule, no_startup_sync, foreground, &output).await
+            start::run_start(schedule, no_startup_sync, foreground, &output).await
+        }
+        Commands::Stop => {
+            start::run_stop(&output).await
         }
         Commands::Config { cmd } => {
             let cmd = cmd.unwrap_or(ConfigCommands::Interactive);

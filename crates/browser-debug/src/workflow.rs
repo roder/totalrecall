@@ -3,7 +3,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use tracing::{debug, info};
-use crate::inspector::PageInspector;
+use crate::inspector::{PageInspector, sanitize_label};
 use crate::verification::VerificationResult;
 
 pub struct DebugWorkflow<'a> {
@@ -121,7 +121,7 @@ impl<'a> DebugWorkflow<'a> {
         verification_selectors: &[&str],
         expected_properties: Option<&HashMap<String, String>>,
     ) -> VerificationResult {
-        if let Some(ref step) = self.current_step {
+        if let Some(ref _step) = self.current_step {
             // Inspect key elements
             match self.inspector.inspect_elements(verification_selectors).await {
                 Ok(elements) => {
@@ -190,12 +190,5 @@ impl<'a> DebugWorkflow<'a> {
             "steps": steps,
         })
     }
-}
-
-fn sanitize_label(label: &str) -> String {
-    label
-        .chars()
-        .map(|c| if c.is_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
-        .collect()
 }
 
