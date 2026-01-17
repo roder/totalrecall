@@ -1,6 +1,78 @@
 # TotalRecall
 
-TotalRecall syncs watchlists, ratings, reviews, and watch history across multiple media services so you have one coherent view and can push changes back to each service.
+TotalRecall is a **bi-directional synchronization tool** that keeps your watchlists, ratings, reviews, and watch history in sync across multiple media services. Whether you rate a movie on IMDB, add a show to your Trakt watchlist, or mark something as watched on Plex, TotalRecall ensures all your services stay up-to-date with a unified view of your media consumption.
+
+## What TotalRecall Does
+
+TotalRecall solves the problem of fragmented media data across different platforms. Instead of manually updating each service when you watch, rate, or review something, TotalRecall automatically:
+
+- **Collects** data from all configured sources (Trakt, Simkl, IMDB, Plex)
+- **Resolves conflicts** when the same item exists in multiple sources with different data
+- **Distributes** the unified, resolved data back to all sources
+
+This creates a **bi-directional sync** where changes flow in both directions: from your services to TotalRecall, and from TotalRecall back to all your services.
+
+## How Sync Works
+
+TotalRecall uses a three-phase sync process:
+
+### Phase 1: Collect
+TotalRecall fetches all data from each configured source:
+- **Watchlist items**: Movies and shows you want to watch
+- **Ratings**: Your 1-10 star ratings (normalized across all sources)
+- **Reviews**: Comments and reviews you've written
+- **Watch history**: Items you've already watched
+
+All data is normalized to a common format. For example, ratings are converted to a 1-10 scale regardless of the source's native format (Plex uses 0-10, others use 1-10).
+
+### Phase 2: Resolve
+When the same item exists in multiple sources with different data, TotalRecall resolves conflicts using your configured strategy:
+
+- **Newest**: Uses the most recently updated item
+- **Oldest**: Uses the oldest item
+- **Preference**: Uses the item from your highest-priority source (configurable via `source_preference`)
+- **Merge**: Combines data from all sources (for ratings: average; for watchlist: union)
+
+For example, if you rated a movie 7/10 on IMDB and 4/10 on Plex, TotalRecall will:
+1. Normalize both ratings to the same scale
+2. Compare them using your resolution strategy
+3. Select one rating (or merge them) based on your preferences
+
+The resolved data becomes the "source of truth" that gets distributed back to all services.
+
+### Phase 3: Distribute
+TotalRecall pushes the resolved data back to all configured sources. This ensures:
+
+- **Bi-directional sync**: Changes flow both ways
+- **Consistency**: All services have the same data
+- **Deduplication**: Items already present in a target source are skipped
+- **Incremental updates**: Only new or changed items are synced (unless `force_full_sync` is enabled)
+
+Each source receives only the data it doesn't already have, filtered to exclude items that originated from that source (to prevent circular updates).
+
+## Why Use TotalRecall?
+
+- **Unified Media Library**: One source of truth for all your media data across platforms
+- **Save Time**: No more manually updating multiple services when you watch or rate something
+- **Flexible Conflict Resolution**: Choose how conflicts are handled based on your preferences
+- **Incremental Sync**: Only syncs changes, making it fast and efficient
+- **Privacy-First**: Runs locally in Docker; your data never leaves your control
+- **Automated**: Runs on a schedule (default: every 6 hours) or on-demand
+
+## Sync Direction: Bi-Directional
+
+TotalRecall performs **bi-directional synchronization**:
+
+1. **Pull**: Collects data from all sources (Trakt → TotalRecall, IMDB → TotalRecall, etc.)
+2. **Merge**: Resolves conflicts to create unified data
+3. **Push**: Distributes unified data back to all sources (TotalRecall → Trakt, TotalRecall → IMDB, etc.)
+
+This means:
+- If you rate a movie on IMDB, that rating will appear on Trakt, Plex, and Simkl after the next sync
+- If you add a show to your Trakt watchlist, it will appear on IMDB and other services
+- If you mark something as watched on Plex, it will be reflected everywhere
+
+**Important**: TotalRecall respects the origin of data. If an item already exists in a target source (and came from that source originally), it won't be overwritten to prevent circular updates. This ensures stable, predictable sync behavior.
 
 ## Supported Media Sources
 
