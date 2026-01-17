@@ -37,9 +37,10 @@ pub fn init_logging_with_file(verbose_level: u8, quiet: bool, log_file: Option<P
             .unwrap_or_else(|_| EnvFilter::new("info"))
     };
 
+    // Default to human-readable format; only use JSON if explicitly requested
     let json = std::env::var("RUST_LOG_JSON")
         .map(|v| v == "true")
-        .unwrap_or_else(|_| !io::stdout().is_terminal());
+        .unwrap_or(false);
 
     let registry = Registry::default().with(filter);
 

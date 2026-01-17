@@ -179,6 +179,22 @@ async fn download_csv(
                     while download_attempts < max_attempts {
                         sleep(Duration::from_secs(1)).await;
                         
+                        // Periodically check if page is still responsive (every 5 seconds)
+                        // This helps detect browser crashes during download
+                        if download_attempts > 0 && download_attempts % 5 == 0 {
+                            // Try a simple operation to check if browser/page is still alive
+                            // Use evaluate to run a simple JavaScript check
+                            match page.evaluate("document.readyState").await {
+                                Ok(_) => {
+                                    debug!("Page is still responsive (attempt {})", download_attempts + 1);
+                                }
+                                Err(e) => {
+                                    warn!("Page became unresponsive during download polling (attempt {}): {}. Browser may have crashed.", download_attempts + 1, e);
+                                    return Err(anyhow!("Browser/page became unresponsive during download: {}", e));
+                                }
+                            }
+                        }
+                        
                         // Check for new CSV files
                         let files_after: Vec<PathBuf> = std::fs::read_dir(download_dir)?
                             .filter_map(|e| e.ok())

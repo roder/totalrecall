@@ -10,7 +10,7 @@ use media_sync_models::{Rating, Review, WatchHistory, WatchlistItem};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH, Duration};
 use tokio::time::sleep;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 use which::which;
 use futures::StreamExt;
 use browser_debug::PageInspector;
@@ -118,15 +118,41 @@ impl ImdbClient {
                 }
             })?;
         
-        // Spawn handler task
+        // Spawn handler task with enhanced error detection
         let handler_task = tokio::spawn(async move {
+            let mut error_count = 0;
+            const MAX_ERRORS: usize = 10;
+            
             while let Some(h) = handler.next().await {
-                if h.is_err() {
-                    warn!("Browser handler error: {:?}", h);
-                    break;
+                match h {
+                    Ok(_) => {
+                        // Reset error count on successful message
+                        error_count = 0;
+                    }
+                    Err(e) => {
+                        error_count += 1;
+                        warn!(
+                            "Browser handler error (count: {}/{}): {:?}",
+                            error_count, MAX_ERRORS, e
+                        );
+                        
+                        // If we get too many errors, the browser is likely crashed
+                        if error_count >= MAX_ERRORS {
+                            error!(
+                                "Browser handler received {} consecutive errors. Browser process may have crashed.",
+                                error_count
+                            );
+                            break;
+                        }
+                    }
                 }
             }
-            info!("Browser handler task ended");
+            
+            if error_count > 0 {
+                error!("Browser handler task ended after {} errors. Browser may have crashed.", error_count);
+            } else {
+                info!("Browser handler task ended normally");
+            }
         });
         
         Ok(Self {
@@ -308,7 +334,9 @@ impl ImdbClient {
             // Docker/headless specific
             builder = builder
                 .arg("--disable-gpu")  // Not needed in headless
-                .arg("--start-maximized");  // Maximize window (even in headless)
+                .arg("--start-maximized")  // Maximize window (even in headless)
+                .arg("--disable-crash-reporter")  // Disable crashpad handler (fixes crashpad database error)
+                .arg("--disable-breakpad");  // Disable breakpad crash reporting
         }
         
         // macOS-specific stability flags
@@ -501,6 +529,23 @@ impl ImdbClient {
         
         Ok(count)
     }
+    
+    /// Check if the browser is still alive and responsive
+    /// Returns an error if the browser appears to have crashed
+    async fn check_browser_health(browser: &Browser) -> Result<()> {
+        // Try to get the browser version as a health check
+        // If the browser has crashed, this will fail
+        match browser.version().await {
+            Ok(_) => {
+                debug!("Browser health check passed");
+                Ok(())
+            }
+            Err(e) => {
+                warn!("Browser health check failed: {}", e);
+                Err(anyhow!("Browser appears to have crashed or is unresponsive: {}", e))
+            }
+        }
+    }
 }
 
 impl Drop for ImdbClient {
@@ -545,9 +590,13 @@ impl MediaSource for ImdbClient {
     async fn get_watchlist(&self) -> Result<Vec<WatchlistItem>, Self::Error> {
         let browser = self.browser.as_ref().ok_or_else(|| crate::error::SourceError::new("Browser not initialized".to_string()))?;
         
+        // Check browser health before starting
+        Self::check_browser_health(browser).await
+            .map_err(|e| crate::error::SourceError::new(format!("Browser health check failed before watchlist download: {}", e)))?;
+        
         // Check if watchlist is empty first by navigating to the watchlist page
         let check_page = browser.new_page("https://www.imdb.com/list/watchlist").await
-            .map_err(|e| crate::error::SourceError::new(format!("Failed to create new page: {}", e)))?;
+            .map_err(|e| crate::error::SourceError::new(format!("Failed to create new page (browser may have crashed): {}", e)))?;
         
         // Wait longer for page to fully load
         sleep(Duration::from_secs(3)).await;
@@ -647,18 +696,33 @@ impl MediaSource for ImdbClient {
         // Wait a moment for the page to fully load and configuration to take effect
         sleep(Duration::from_secs(2)).await;
         
+        // Check browser health before download
+        if let Err(e) = Self::check_browser_health(browser).await {
+            page.close().await.ok();
+            return Err(crate::error::SourceError::new(format!("Browser health check failed before watchlist download: {}", e)));
+        }
+        
         let cache = self.downloaded_files.lock().unwrap().clone();
         let files = match download::download_exports(&page, &self.download_dir, true, false, false, false, false, &cache).await {
             Ok(files) => files,
             Err(e) => {
                 let error_msg = format!("{}", e);
                 page.close().await.ok();
+                
+                // Check browser health after download failure (async check)
+                let health_check_future = Self::check_browser_health(browser);
+                let health_msg = match tokio::time::timeout(Duration::from_secs(2), health_check_future).await {
+                    Ok(Ok(_)) => String::new(),
+                    Ok(Err(he)) => format!(" Browser appears to have crashed: {}.", he),
+                    Err(_) => " Browser health check timed out (browser may have crashed).".to_string(),
+                };
+                
                 // If export is not available (likely empty), return empty list
                 if error_msg.contains("Export not available") || error_msg.contains("not available") {
                     info!("Watchlist export not available (likely empty), returning empty list");
                     return Ok(vec![]);
                 }
-                return Err(crate::error::SourceError::new(format!("Failed to download IMDB watchlist export: {}", e)));
+                return Err(crate::error::SourceError::new(format!("Failed to download IMDB watchlist export: {}.{}", e, health_msg)));
             }
         };
         // Update cache with downloaded files
@@ -733,13 +797,21 @@ impl MediaSource for ImdbClient {
     async fn get_ratings(&self) -> Result<Vec<Rating>, Self::Error> {
         let browser = self.browser.as_ref().ok_or_else(|| crate::error::SourceError::new("Browser not initialized".to_string()))?;
         
+        // Check browser health before starting
+        Self::check_browser_health(browser).await
+            .map_err(|e| crate::error::SourceError::new(format!("Browser health check failed before ratings download: {}", e)))?;
+        
         // Generate ratings export
         export::generate_exports(browser, false, true, false, false, false).await
             .map_err(|e| crate::error::SourceError::new(format!("Failed to generate IMDB ratings export: {}", e)))?;
         
+        // Check browser health after export generation
+        Self::check_browser_health(browser).await
+            .map_err(|e| crate::error::SourceError::new(format!("Browser health check failed after export generation: {}", e)))?;
+        
         // Create a new page for downloading (exports page)
         let page = browser.new_page("https://www.imdb.com/exports/").await
-            .map_err(|e| crate::error::SourceError::new(format!("Failed to create new page: {}", e)))?;
+            .map_err(|e| crate::error::SourceError::new(format!("Failed to create new page (browser may have crashed): {}", e)))?;
         
         // Configure downloads on THIS page before attempting download
         Self::configure_downloads(&page, &self.download_dir).await
@@ -748,9 +820,24 @@ impl MediaSource for ImdbClient {
         // Wait a moment for the page to fully load and configuration to take effect
         sleep(Duration::from_secs(2)).await;
         
+        // Check browser health before download
+        Self::check_browser_health(browser).await
+            .map_err(|e| crate::error::SourceError::new(format!("Browser health check failed before download: {}", e)))?;
+        
         let cache = self.downloaded_files.lock().unwrap().clone();
-        let files = download::download_exports(&page, &self.download_dir, false, true, false, false, false, &cache).await
-            .map_err(|e| crate::error::SourceError::new(format!("Failed to download IMDB ratings export: {}", e)))?;
+        let files = match download::download_exports(&page, &self.download_dir, false, true, false, false, false, &cache).await {
+            Ok(files) => files,
+            Err(e) => {
+                // Check browser health after download failure
+                let health_check_future = Self::check_browser_health(browser);
+                let health_msg = match tokio::time::timeout(Duration::from_secs(2), health_check_future).await {
+                    Ok(Ok(_)) => String::new(),
+                    Ok(Err(he)) => format!(" Browser appears to have crashed: {}.", he),
+                    Err(_) => " Browser health check timed out (browser may have crashed).".to_string(),
+                };
+                return Err(crate::error::SourceError::new(format!("Failed to download IMDB ratings export: {}.{}", e, health_msg)));
+            }
+        };
         // Update cache with downloaded files
         if let Some(ref path) = files.ratings {
             self.downloaded_files.lock().unwrap().insert("ratings".to_string(), path.clone());
@@ -835,13 +922,21 @@ impl MediaSource for ImdbClient {
     async fn get_watch_history(&self) -> Result<Vec<WatchHistory>, Self::Error> {
         let browser = self.browser.as_ref().ok_or_else(|| crate::error::SourceError::new("Browser not initialized".to_string()))?;
         
+        // Check browser health before starting
+        Self::check_browser_health(browser).await
+            .map_err(|e| crate::error::SourceError::new(format!("Browser health check failed before check-ins download: {}", e)))?;
+        
         // Generate check-ins export
         export::generate_exports(browser, false, false, true, false, false).await
             .map_err(|e| crate::error::SourceError::new(format!("Failed to generate IMDB check-ins export: {}", e)))?;
         
+        // Check browser health after export generation
+        Self::check_browser_health(browser).await
+            .map_err(|e| crate::error::SourceError::new(format!("Browser health check failed after check-ins export generation: {}", e)))?;
+        
         // Create a new page for downloading (exports page)
         let page = browser.new_page("https://www.imdb.com/exports/").await
-            .map_err(|e| crate::error::SourceError::new(format!("Failed to create new page: {}", e)))?;
+            .map_err(|e| crate::error::SourceError::new(format!("Failed to create new page (browser may have crashed): {}", e)))?;
         
         // Configure downloads on THIS page before attempting download
         Self::configure_downloads(&page, &self.download_dir).await
@@ -850,9 +945,26 @@ impl MediaSource for ImdbClient {
         // Wait a moment for the page to fully load and configuration to take effect
         sleep(Duration::from_secs(2)).await;
         
+        // Check browser health before download
+        if let Err(e) = Self::check_browser_health(browser).await {
+            page.close().await.ok();
+            return Err(crate::error::SourceError::new(format!("Browser health check failed before check-ins download: {}", e)));
+        }
+        
         let cache = self.downloaded_files.lock().unwrap().clone();
-        let files = download::download_exports(&page, &self.download_dir, false, false, true, false, false, &cache).await
-            .map_err(|e| crate::error::SourceError::new(format!("Failed to download IMDB check-ins export: {}", e)))?;
+        let files = match download::download_exports(&page, &self.download_dir, false, false, true, false, false, &cache).await {
+            Ok(files) => files,
+            Err(e) => {
+                // Check browser health after download failure
+                let health_check_future = Self::check_browser_health(browser);
+                let health_msg = match tokio::time::timeout(Duration::from_secs(2), health_check_future).await {
+                    Ok(Ok(_)) => String::new(),
+                    Ok(Err(he)) => format!(" Browser appears to have crashed: {}.", he),
+                    Err(_) => " Browser health check timed out (browser may have crashed).".to_string(),
+                };
+                return Err(crate::error::SourceError::new(format!("Failed to download IMDB check-ins export: {}.{}", e, health_msg)));
+            }
+        };
         // Update cache with downloaded files
         if let Some(ref path) = files.checkins {
             self.downloaded_files.lock().unwrap().insert("check-ins".to_string(), path.clone());

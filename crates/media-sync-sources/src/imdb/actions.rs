@@ -14,7 +14,11 @@ pub async fn add_to_watchlist(page: &Page, items: &[WatchlistItem]) -> Result<()
     }
 
     let progress_interval = if items.len() < 50 { 10 } else { 50 };
-    let mut tracker = ProgressTracker::new(items.len(), progress_interval);
+    let mut tracker = ProgressTracker::with_operation_name(
+        items.len(),
+        progress_interval,
+        Some("IMDB watchlist add".to_string()),
+    );
 
     for (idx, item) in items.iter().enumerate() {
         let current = idx + 1;
@@ -139,7 +143,11 @@ pub async fn remove_from_watchlist(page: &Page, items: &[WatchlistItem]) -> Resu
     }
 
     let progress_interval = if items.len() < 50 { 10 } else { 50 };
-    let mut tracker = ProgressTracker::new(items.len(), progress_interval);
+    let mut tracker = ProgressTracker::with_operation_name(
+        items.len(),
+        progress_interval,
+        Some("IMDB watchlist remove".to_string()),
+    );
 
     for (idx, item) in items.iter().enumerate() {
         let current = idx + 1;
@@ -268,7 +276,11 @@ pub async fn set_ratings(
     }
 
     let progress_interval = if ratings.len() < 50 { 10 } else { 50 };
-    let mut tracker = ProgressTracker::new(ratings.len(), progress_interval);
+    let mut tracker = ProgressTracker::with_operation_name(
+        ratings.len(),
+        progress_interval,
+        Some("IMDB ratings set".to_string()),
+    );
     
     for (idx, rating) in ratings.iter().enumerate() {
         let current = idx + 1;
@@ -787,7 +799,11 @@ pub async fn set_reviews(
     }
 
     let progress_interval = if reviews.len() < 25 { 10 } else { 25 };
-    let mut tracker = ProgressTracker::new(reviews.len(), progress_interval);
+    let mut tracker = ProgressTracker::with_operation_name(
+        reviews.len(),
+        progress_interval,
+        Some("IMDB reviews set".to_string()),
+    );
 
     for (idx, review) in reviews.iter().enumerate() {
         let current = idx + 1;
@@ -898,7 +914,11 @@ pub async fn add_watch_history(page: &Page, items: &[WatchHistory]) -> Result<()
     }
 
     let progress_interval = if items.len() < 50 { 10 } else { 50 };
-    let mut tracker = ProgressTracker::new(items.len(), progress_interval);
+    let mut tracker = ProgressTracker::with_operation_name(
+        items.len(),
+        progress_interval,
+        Some("IMDB check-ins add".to_string()),
+    );
 
     for (idx, item) in items.iter().enumerate() {
         let current = idx + 1;

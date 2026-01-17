@@ -1366,7 +1366,11 @@ impl MediaSource for PlexClient {
         }
 
         let progress_interval = if items.len() < 50 { 10 } else { 50 };
-        let mut tracker = ProgressTracker::new(items.len(), progress_interval);
+        let mut tracker = ProgressTracker::with_operation_name(
+            items.len(),
+            progress_interval,
+            Some("Plex watchlist add".to_string()),
+        );
         let mut added_count = 0;
         let mut not_found_count = 0;
         
@@ -1433,7 +1437,11 @@ impl MediaSource for PlexClient {
         }
 
         let progress_interval = if items.len() < 50 { 10 } else { 50 };
-        let mut tracker = ProgressTracker::new(items.len(), progress_interval);
+        let mut tracker = ProgressTracker::with_operation_name(
+            items.len(),
+            progress_interval,
+            Some("Plex watchlist remove".to_string()),
+        );
         
         for (idx, item) in items.iter().enumerate() {
             let current = idx + 1;
@@ -1494,7 +1502,11 @@ impl MediaSource for PlexClient {
         }
 
         let progress_interval = if ratings.len() < 50 { 10 } else { 50 };
-        let mut tracker = ProgressTracker::new(ratings.len(), progress_interval);
+        let mut tracker = ProgressTracker::with_operation_name(
+            ratings.len(),
+            progress_interval,
+            Some("Plex ratings set".to_string()),
+        );
         
         for (idx, rating) in ratings.iter().enumerate() {
             let current = idx + 1;
@@ -1631,7 +1643,11 @@ impl MediaSource for PlexClient {
         }
 
         let progress_interval = if items.len() < 50 { 10 } else { 50 };
-        let mut tracker = ProgressTracker::new(items.len(), progress_interval);
+        let mut tracker = ProgressTracker::with_operation_name(
+            items.len(),
+            progress_interval,
+            Some("Plex watch history add".to_string()),
+        );
         let mut success_count = 0;
         let mut not_found_count = 0;
         let mut error_count = 0;

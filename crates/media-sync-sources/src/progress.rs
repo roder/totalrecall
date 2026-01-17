@@ -13,6 +13,7 @@ pub struct ProgressTracker {
     progress_interval: usize, // Log every N items
     last_progress_log: usize,
     error_counts: HashMap<String, usize>, // Track errors by category
+    operation_name: Option<String>, // Optional operation name for context in logs
 }
 
 impl ProgressTracker {
@@ -22,10 +23,24 @@ impl ProgressTracker {
     /// * `total` - Total number of items to process
     /// * `progress_interval` - Log progress every N items (e.g., 50 for most operations, 25 for slower operations)
     pub fn new(total: usize, progress_interval: usize) -> Self {
+        Self::with_operation_name(total, progress_interval, None)
+    }
+
+    /// Create a new progress tracker with an operation name
+    /// 
+    /// # Arguments
+    /// * `total` - Total number of items to process
+    /// * `progress_interval` - Log progress every N items
+    /// * `operation_name` - Name of the operation (e.g., "Plex watchlist add") for context in progress logs
+    pub fn with_operation_name(total: usize, progress_interval: usize, operation_name: Option<String>) -> Self {
         // Only log "Starting operation" if we expect it to take time
         // Skip for very small batches that are likely instant
         if total > 10 || progress_interval < total {
-            info!("Starting operation: {} items to process", total);
+            if let Some(ref op_name) = operation_name {
+                info!("Starting operation: {} - {} items to process", op_name, total);
+            } else {
+                info!("Starting operation: {} items to process", total);
+            }
         }
         Self {
             total,
@@ -37,6 +52,7 @@ impl ProgressTracker {
             progress_interval,
             last_progress_log: 0,
             error_counts: HashMap::new(),
+            operation_name,
         }
     }
 
@@ -90,11 +106,20 @@ impl ProgressTracker {
                 return;
             }
             
-            info!(
-                "Progress: {}/{} ({:.1} items/sec) | Added: {} | Present: {} | Failed: {} | Skipped: {}",
-                current, self.total, rate,
-                self.added, self.already_present, self.failed, self.skipped
-            );
+            // Include operation name in progress log if available
+            if let Some(ref op_name) = self.operation_name {
+                info!(
+                    "{} - Progress: {}/{} ({:.1} items/sec) | Added: {} | Present: {} | Failed: {} | Skipped: {}",
+                    op_name, current, self.total, rate,
+                    self.added, self.already_present, self.failed, self.skipped
+                );
+            } else {
+                info!(
+                    "Progress: {}/{} ({:.1} items/sec) | Added: {} | Present: {} | Failed: {} | Skipped: {}",
+                    current, self.total, rate,
+                    self.added, self.already_present, self.failed, self.skipped
+                );
+            }
             self.last_progress_log = current;
         }
     }
