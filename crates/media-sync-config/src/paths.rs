@@ -79,7 +79,7 @@ impl PathManager {
     }
 
     pub fn daemon_log_file(&self) -> PathBuf {
-        self.log_dir.join("daemon.log")
+        self.log_dir.join("totalrecall.log")
     }
 
     pub fn ensure_directories(&self) -> Result<()> {

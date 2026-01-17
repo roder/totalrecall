@@ -6,6 +6,7 @@ use tracing_subscriber::{
     layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Registry,
 };
 use tracing_subscriber::fmt::{self, time::ChronoUtc};
+use tracing_appender::rolling::{RollingFileAppender, Rotation};
 
 pub fn init_logging(verbose_level: u8, quiet: bool) -> Result<()> {
     init_logging_with_file(verbose_level, quiet, None)
@@ -49,24 +50,38 @@ pub fn init_logging_with_file(verbose_level: u8, quiet: bool, log_file: Option<P
             std::fs::create_dir_all(parent)?;
         }
 
-        // Open log file in append mode
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log_path)?;
+        // Create rotating file appender (daily rotation)
+        // Files will be named: totalrecall.log, totalrecall.log.2026-01-17, etc.
+        let log_dir = log_path.parent()
+            .ok_or_else(|| anyhow::anyhow!("Log file path has no parent directory"))?;
+        let log_filename = log_path.file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| anyhow::anyhow!("Invalid log filename"))?;
+        
+        // Remove extension for rotation prefix (e.g., "totalrecall" from "totalrecall.log")
+        let log_prefix = log_filename
+            .rsplitn(2, '.')
+            .nth(1)
+            .unwrap_or(log_filename);
+        
+        let file_appender = RollingFileAppender::new(
+            Rotation::DAILY,  // Rotate daily at midnight
+            log_dir,
+            log_prefix
+        );
 
         if json {
             let json_layer = fmt::layer()
                 .json()
                 .with_timer(ChronoUtc::rfc_3339())
-                .with_writer(file);
+                .with_writer(file_appender);
 
             registry.with(json_layer).init();
         } else {
             let fmt_layer = fmt::layer()
                 .with_timer(ChronoUtc::rfc_3339())
                 .with_ansi(false)  // Disable ANSI codes when writing to file
-                .with_writer(file);
+                .with_writer(file_appender);
 
             registry.with(fmt_layer).init();
         }

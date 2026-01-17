@@ -48,6 +48,7 @@ anyhow = "1"
 # Logging (structured JSON for Docker)
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json", "chrono"] }
+tracing-appender = "0.2"
 
 # Config (TOML only - no YAML)
 toml = "0.8"
