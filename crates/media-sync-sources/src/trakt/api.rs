@@ -1153,10 +1153,46 @@ pub async fn search_by_title(
     }
     
     let items: Vec<serde_json::Value> = response.json().await?;
+
+    // Find best match with validation
+    let mut best_match: Option<&serde_json::Value> = None;
+    for item in &items {
+        let item_type = item.get("type").and_then(|t| t.as_str());
+        if item_type != Some(search_type) {
+            continue;
+        }
+        
+        // Handle Option types properly - can't use ? on Option
+        let media_json = match item.get(search_type) {
+            Some(json) => json,
+            None => continue, // Skip items without the expected media type field
+        };
+        
+        let item_title = match media_json.get("title").and_then(|t| t.as_str()) {
+            Some(title_str) => title_str,
+            None => continue, // Skip items without title
+        };
+        
+        let item_year = media_json.get("year").and_then(|y| y.as_u64()).map(|y| y as u32);
+        
+        // Check title match
+        let title_match = item_title == title;
+        
+        // Check year match if both available
+        let year_match = match (year, item_year) {
+            (Some(search_year), Some(item_year)) => search_year == item_year,
+            (None, _) | (_, None) => true,
+        };
+        
+        if title_match && year_match {
+            best_match = Some(item);
+            break; // Exact match found
+        }
+    }
     
     // If we got results, try to extract IDs
-    if let Some(first_item) = items.first() {
-        let ids_value = first_item.get(search_type)
+    if let Some(matched_item) = best_match {
+        let ids_value = matched_item.get(search_type)
             .and_then(|m| m.get("ids"));
         
         if let Some(ids_json) = ids_value {
@@ -1174,6 +1210,10 @@ pub async fn search_by_title(
             
             return Ok(Some(media_ids));
         }
+    } else if !items.is_empty() {
+        // No title/year match found, but we have results
+        warn!("Trakt search: Found {} results for '{}' (normalized: '{}') but none matched title/year", 
+              items.len(), title, normalized_title);
     }
     
     Ok(None)

@@ -2,6 +2,14 @@
 
 TotalRecall is a **bi-directional synchronization tool** that keeps your watchlists, ratings, reviews, and watch history in sync across multiple media services. Whether you rate a movie on IMDB, add a show to your Trakt watchlist, or mark something as watched on Plex, TotalRecall ensures all your services stay up-to-date with a unified view of your media consumption.
 
+## Editors Note
+
+I vibe coded this AI slop into existance.  I have been programming for decades, but this project was a "quick and dirty" tool that I wanted, so I made the tradeoff of quality for quantity.  It started because I wanted to use sync from IMDB to Trakt using [IMDB-Trakt-Syncer](https://github.com/RileyXX/IMDb-Trakt-Syncer), but there was a bug that needed to be fixed, and I wanted it to run in a docker container. After evaluating my options, I decided I wanted something faster and thinner than Python and Selenium.  I prefer Rust and there was a headless Chromium crate called [chromiumoxide](https://github.com/mattsse/chromiumoxide), so I set Claude off on the task of porting it to Rust. 
+
+Then I decided I wanted to migrate from Trakt to Simlk, and have integration with my Plex server. So I re-architected the sync into a bi-directional pipeline that was extensible for future data sources.  I'm planning to add a few more sources: MyAnimeList, TVDB, TMDB, and MDList. 
+
+I've been running this code for awhile to sort out the bugs and it works for me... your milage may vary - be warned, it is vibe-coded AI slop... 
+
 ## What TotalRecall Does
 
 TotalRecall solves the problem of fragmented media data across different platforms. Instead of manually updating each service when you watch, rate, or review something, TotalRecall automatically:

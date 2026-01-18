@@ -58,6 +58,7 @@ pub struct MetadataItem {
     pub rating_key: String,
     pub user_rating: Option<f64>,
     pub title: String,
+    pub year: Option<u32>,
     pub guids: Vec<Guid>,
 }
 
@@ -565,11 +566,13 @@ impl PlexHttpClient {
                             .unwrap_or("")
                             .to_string();
                         let guids = self.parse_guid_array(item.get("Guid").unwrap_or(&Value::Null));
+                        let year = item.get("year").and_then(|y| y.as_u64()).map(|y| y as u32);
 
                         return Ok(MetadataItem {
                             rating_key,
                             user_rating,
                             title,
+                            year,
                             guids,
                         });
                     }
@@ -1094,6 +1097,7 @@ impl PlexHttpClient {
                             rating_key: metadata_item.rating_key,
                             user_rating: metadata_item.user_rating,
                             title: metadata_item.title,
+                            year: metadata_item.year,
                             guids: metadata_item.guids,
                         });
                     }
@@ -1262,6 +1266,7 @@ impl PlexHttpClient {
                                         rating_key,
                                         user_rating: None, // Discover provider results don't include user ratings
                                         title,
+                                        year,
                                         guids,
                                     });
                                 }
@@ -1284,6 +1289,7 @@ impl PlexHttpClient {
                                 rating_key: metadata_item.rating_key,
                                 user_rating: metadata_item.user_rating,
                                 title: metadata_item.title,
+                                year: metadata_item.year,
                                 guids: metadata_item.guids,
                             });
                         }

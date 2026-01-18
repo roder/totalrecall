@@ -1028,14 +1028,36 @@ impl MediaSource for PlexClient {
                                     
                                     debug!("Plex watchlist: Searching {} movies in library '{}'", movies.len(), library.title);
                                     for movie in movies {
-                                        // Match by title and year (if both available)
+                                        // Priority 1: Check IMDB ID match first (if available)
+                                        let imdb_match = if let Some(existing_imdb) = Self::extract_imdb_id_from_guids(&item_with_guids.guids) {
+                                            if let Some(movie_imdb) = Self::extract_imdb_id_from_guids(&movie.guids) {
+                                                existing_imdb == movie_imdb
+                                            } else {
+                                                false
+                                            }
+                                        } else {
+                                            false // No existing IMDB ID to validate against
+                                        };
+                                        
+                                        if imdb_match {
+                                            // IMDB ID match - accept immediately
+                                            trace!("Plex watchlist: Found IMDB ID match '{}' (IMDB: {}) in library", 
+                                                   movie.title, 
+                                                   Self::extract_imdb_id_from_guids(&movie.guids).unwrap_or_default());
+                                            item_with_guids.guids = movie.guids;
+                                            found = true;
+                                            break;
+                                        }
+                                        
+                                        // Priority 2: Check title and year match
                                         let title_match = movie.title == item_with_guids.title;
                                         let year_match = match (item_with_guids.year, movie.year) {
                                             (Some(watchlist_year), Some(movie_year)) => watchlist_year == movie_year,
-                                            (None, _) | (_, None) => true, // If either is missing, don't filter by year
+                                            (None, _) | (_, None) => true,
                                         };
                                         
                                         if title_match && year_match {
+                                            // Title/year match - accept
                                             trace!("Plex watchlist: Found matching movie '{}' (year: {:?}) in library, found {} GUIDs", 
                                                    movie.title, movie.year, movie.guids.len());
                                             item_with_guids.guids = movie.guids;
@@ -1070,7 +1092,28 @@ impl MediaSource for PlexClient {
                                     
                                     debug!("Plex watchlist: Searching {} shows in library '{}'", shows.len(), library.title);
                                     for show in shows {
-                                        // Match by title and year (if both available)
+                                        // Priority 1: Check IMDB ID match first (if available)
+                                        let imdb_match = if let Some(existing_imdb) = Self::extract_imdb_id_from_guids(&item_with_guids.guids) {
+                                            if let Some(show_imdb) = Self::extract_imdb_id_from_guids(&show.guids) {
+                                                existing_imdb == show_imdb
+                                            } else {
+                                                false
+                                            }
+                                        } else {
+                                            false // No existing IMDB ID to validate against
+                                        };
+                                        
+                                        if imdb_match {
+                                            // IMDB ID match - accept immediately
+                                            trace!("Plex watchlist: Found IMDB ID match '{}' (IMDB: {}) in library", 
+                                                   show.title, 
+                                                   Self::extract_imdb_id_from_guids(&show.guids).unwrap_or_default());
+                                            item_with_guids.guids = show.guids;
+                                            found = true;
+                                            break;
+                                        }
+                                        
+                                        // Priority 2: Check title and year match
                                         let title_match = show.title == item_with_guids.title;
                                         let year_match = match (item_with_guids.year, show.year) {
                                             (Some(watchlist_year), Some(show_year)) => watchlist_year == show_year,
@@ -1078,6 +1121,7 @@ impl MediaSource for PlexClient {
                                         };
                                         
                                         if title_match && year_match {
+                                            // Title/year match - accept
                                             debug!("Plex watchlist: Found matching show '{}' (year: {:?}) in library, found {} GUIDs", 
                                                    show.title, show.year, show.guids.len());
                                             item_with_guids.guids = show.guids;
@@ -1115,11 +1159,57 @@ impl MediaSource for PlexClient {
                                             item_with_guids.guids = match_result.guids.clone();
                                             found = true;
                                         } else if !search_results.is_empty() {
-                                            // Use first result even if title doesn't match exactly (fuzzy match)
-                                            trace!("Plex watchlist: Using first search result '{}' (title doesn't match exactly) with {} GUIDs", 
-                                                   search_results[0].title, search_results[0].guids.len());
-                                            item_with_guids.guids = search_results[0].guids.clone();
-                                            found = true;
+                                            // Priority 1: Check IMDB ID match first (if available)
+                                            let mut imdb_match: Option<&MetadataItem> = None;
+                                            if let Some(existing_imdb) = Self::extract_imdb_id_from_guids(&item_with_guids.guids) {
+                                                for result in &search_results {
+                                                    if let Some(result_imdb) = Self::extract_imdb_id_from_guids(&result.guids) {
+                                                        if existing_imdb == result_imdb {
+                                                            imdb_match = Some(result);
+                                                            break; // IMDB ID match found - no further validation needed
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            
+                                            if let Some(match_result) = imdb_match {
+                                                trace!("Plex watchlist: Search API found IMDB ID match '{}' (IMDB: {}) with {} GUIDs", 
+                                                       match_result.title, 
+                                                       Self::extract_imdb_id_from_guids(&match_result.guids).unwrap_or_default(),
+                                                       match_result.guids.len());
+                                                item_with_guids.guids = match_result.guids.clone();
+                                                found = true;
+                                            } else {
+                                                // Priority 2: Try to find a match that validates against title and year
+                                                let mut validated_match: Option<&MetadataItem> = None;
+                                                
+                                                for result in &search_results {
+                                                    // Check title match
+                                                    let title_match = result.title == item_with_guids.title;
+                                                    
+                                                    // Check year match if both are available
+                                                    let year_match = match (item_with_guids.year, result.year) {
+                                                        (Some(watchlist_year), Some(result_year)) => watchlist_year == result_year,
+                                                        (None, _) | (_, None) => true, // If either is missing, don't filter by year
+                                                    };
+                                                    
+                                                    if title_match && year_match {
+                                                        validated_match = Some(result);
+                                                        break;
+                                                    }
+                                                }
+                                                
+                                                if let Some(match_result) = validated_match {
+                                                    trace!("Plex watchlist: Search API found title/year match '{}' (year: {:?}) with {} GUIDs", 
+                                                           match_result.title, match_result.year, match_result.guids.len());
+                                                    item_with_guids.guids = match_result.guids.clone();
+                                                    found = true;
+                                                } else {
+                                                    warn!("Plex watchlist: Search API returned {} results for '{}' but none passed validation (no IMDB ID match, no title/year match)", 
+                                                          search_results.len(), item_with_guids.title);
+                                                    // Don't use fuzzy match - let it be resolved later via ID resolution
+                                                }
+                                            }
                                         } else {
                                             trace!("Plex watchlist: Search API returned no results for '{}', trying TMDB lookup", item_with_guids.title);
                                             
