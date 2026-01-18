@@ -16,8 +16,63 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
-  build-and-push:
+  check-release:
+    name: Check for release artifacts
     runs-on: ubuntu-latest
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: read
+    outputs:
+      has_artifacts: ${{ steps.check.outputs.has_artifacts }}
+      version: ${{ steps.tag.outputs.version }}
+    steps:
+      - name: Extract version from tag
+        id: tag
+        run: |
+          TAG_NAME="${{ github.ref_name }}"
+          VERSION="${TAG_NAME#v}"  # Remove 'v' prefix
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Tag version: $VERSION"
+
+      - name: Check if release exists with artifacts
+        id: check
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const tag = '${{ steps.tag.outputs.version }}';
+            const [owner, repo] = '${{ github.repository }}'.split('/');
+            
+            try {
+              const release = await github.rest.repos.getReleaseByTag({
+                owner,
+                repo,
+                tag: `v${tag}`
+              });
+              
+              // Check if release has the required artifacts
+              const assets = release.data.assets || [];
+              const hasAmd64 = assets.some(a => a.name.includes('x86_64-unknown-linux-gnu'));
+              const hasArm64 = assets.some(a => a.name.includes('aarch64-unknown-linux-gnu'));
+              
+              const hasArtifacts = hasAmd64 && hasArm64;
+              
+              core.setOutput('has_artifacts', hasArtifacts);
+              
+              if (hasArtifacts) {
+                console.log(`✓ Release v${tag} found with required artifacts`);
+              } else {
+                console.log(`⚠ Release v${tag} exists but missing required artifacts`);
+              }
+            } catch (error) {
+              console.log(`Release v${tag} not found: ${error.message}`);
+              core.setOutput('has_artifacts', false);
+            }
+
+  build-and-push:
+    name: Build and push container
+    runs-on: ubuntu-latest
+    needs: [check-release]
+    if: always() && (needs.check-release.result == 'skipped' || needs.check-release.outputs.has_artifacts == 'false' || needs.check-release.outputs.has_artifacts == '')
     permissions:
       contents: read
       packages: write
@@ -25,6 +80,16 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Cache cargo registry and git
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -54,6 +119,23 @@ jobs:
           echo "is_semver_tag=$IS_SEMVER_TAG" >> $GITHUB_OUTPUT
           echo "is_main_branch=$IS_MAIN_BRANCH" >> $GITHUB_OUTPUT
 
+      - name: Determine build platforms
+        id: platforms
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "platforms=linux/amd64" >> $GITHUB_OUTPUT
+            echo "Building for PR: linux/amd64 only"
+          elif [ "${{ steps.check-tags.outputs.is_main_branch }}" = "true" ]; then
+            echo "platforms=linux/amd64" >> $GITHUB_OUTPUT
+            echo "Building for main branch (development tag): linux/amd64 only"
+          elif [ "${{ steps.check-tags.outputs.is_semver_tag }}" = "true" ]; then
+            echo "platforms=linux/amd64,linux/arm64" >> $GITHUB_OUTPUT
+            echo "Building for tagged release: linux/amd64,linux/arm64"
+          else
+            echo "platforms=linux/amd64" >> $GITHUB_OUTPUT
+            echo "Default: linux/amd64 only"
+          fi
+
       - name: Extract metadata (tags, labels)
         id: meta
         uses: docker/metadata-action@v5
@@ -74,7 +156,7 @@ jobs:
         with:
           context: .
           file: ./Containerfile
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ steps.platforms.outputs.platforms }}
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
@@ -106,7 +188,129 @@ jobs:
           echo "- **Commit**: \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
           echo "- **Branch/Tag**: \`${{ github.ref_name }}\`" >> $GITHUB_STEP_SUMMARY
           echo "- **Event**: \`${{ github.event_name }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Platforms**: \`${{ steps.platforms.outputs.platforms }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Build Method**: Source build" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          # Extract individual tags for display
+          TAGS="${{ steps.meta.outputs.tags }}"
+          echo "### Individual Tag Links" >> $GITHUB_STEP_SUMMARY
+          IFS=',' read -ra TAG_ARRAY <<< "$TAGS"
+          for tag in "${TAG_ARRAY[@]}"; do
+            tag=$(echo "$tag" | xargs)  # trim whitespace
+            if [ -n "$tag" ]; then
+              echo "- [\`$tag\`](${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$tag)" >> $GITHUB_STEP_SUMMARY
+            fi
+          done
+
+  build-from-release:
+    name: Build container from release artifacts
+    runs-on: ubuntu-latest
+    needs: [check-release]
+    if: needs.check-release.outputs.has_artifacts == 'true'
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download release artifacts
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const tag = '${{ needs.check-release.outputs.version }}';
+            const [owner, repo] = '${{ github.repository }}'.split('/');
+            
+            const release = await github.rest.repos.getReleaseByTag({
+              owner,
+              repo,
+              tag: `v${tag}`
+            });
+            
+            const assets = release.data.assets || [];
+            const amd64Asset = assets.find(a => a.name.includes('x86_64-unknown-linux-gnu'));
+            const arm64Asset = assets.find(a => a.name.includes('aarch64-unknown-linux-gnu'));
+            
+            if (!amd64Asset || !arm64Asset) {
+              core.setFailed('Required artifacts not found in release');
+              return;
+            }
+            
+            // Download artifacts using curl (more reliable than Node.js https)
+            const { execSync } = require('child_process');
+            execSync(`curl -L -o totalrecall-amd64.tar.gz "${amd64Asset.browser_download_url}"`);
+            execSync(`curl -L -o totalrecall-arm64.tar.gz "${arm64Asset.browser_download_url}"`);
+            
+            console.log(`Downloaded ${amd64Asset.name} and ${arm64Asset.name}`);
+
+      - name: Extract binaries
+        run: |
+          mkdir -p binaries/linux/amd64 binaries/linux/arm64
+          tar -xzf totalrecall-amd64.tar.gz -C binaries/linux/amd64
+          tar -xzf totalrecall-arm64.tar.gz -C binaries/linux/arm64
+          ls -la binaries/linux/amd64/
+          ls -la binaries/linux/arm64/
+
+      - name: Extract metadata (tags, labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=latest
+
+      - name: Build and push Docker image from artifacts
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Containerfile.from-release
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: false
+          sbom: false
+          build-args: |
+            BINARY_AMD64_PATH=binaries/linux/amd64/totalrecall
+            BINARY_ARM64_PATH=binaries/linux/arm64/totalrecall
+
+      - name: Build Summary
+        run: |
+          echo "## 🐳 Container Image Build Summary (from release artifacts)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Image Details" >> $GITHUB_STEP_SUMMARY
+          echo "- **Registry**: \`${{ env.REGISTRY }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Repository**: \`${{ env.IMAGE_NAME }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Full Image**: \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Tags" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo "${{ steps.meta.outputs.tags }}" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Quick Links" >> $GITHUB_STEP_SUMMARY
+          echo "- [View Package in GHCR](https://github.com/${{ github.repository }}/pkgs/container/${{ env.IMAGE_NAME }})" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Build Information" >> $GITHUB_STEP_SUMMARY
+          echo "- **Version**: \`v${{ needs.check-release.outputs.version }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Commit**: \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
           echo "- **Platforms**: \`linux/amd64, linux/arm64\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Build Method**: Release artifacts (no source build needed)" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           
           # Extract individual tags for display

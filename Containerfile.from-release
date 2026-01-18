@@ -1,0 +1,68 @@
+# Multi-stage build using pre-built release artifacts
+# This Containerfile is used when building from GitHub release artifacts
+# It avoids the need to compile from source for tagged releases
+#
+# Note: Buildx builds each platform separately, so we copy both binaries
+# and select the correct one based on TARGETPLATFORM
+
+ARG BINARY_AMD64_PATH
+ARG BINARY_ARM64_PATH
+ARG TARGETPLATFORM
+
+# Stage 1: Copy both binaries (buildx will build each platform separately)
+FROM scratch as binaries
+ARG BINARY_AMD64_PATH
+ARG BINARY_ARM64_PATH
+COPY ${BINARY_AMD64_PATH} /totalrecall-amd64
+COPY ${BINARY_ARM64_PATH} /totalrecall-arm64
+
+# Stage 2: Runtime - minimal runtime image with headless Chromium
+FROM debian:trixie-slim
+
+# Install Chromium and dependencies, verify installation, and set permissions in one layer
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    chromium \
+    chromium-sandbox \
+    procps \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean \
+    && (which chromium || which chromium-browser || (echo "Chromium not found" && exit 1)) \
+    && chmod +x /usr/bin/chromium /usr/bin/chromium-browser 2>/dev/null || true
+
+# Create non-root user for security
+RUN useradd -m -u 1000 totalrecall && \
+    mkdir -p /app/data /app/logs && \
+    chown -R totalrecall:totalrecall /app
+
+# Copy both binaries
+COPY --from=binaries /totalrecall-amd64 /tmp/totalrecall-amd64
+COPY --from=binaries /totalrecall-arm64 /tmp/totalrecall-arm64
+
+# Select the correct binary based on TARGETPLATFORM
+# Buildx sets TARGETPLATFORM automatically for each platform build
+ARG TARGETPLATFORM
+RUN if [ "$TARGETPLATFORM" = "linux/amd64" ]; then \
+      cp /tmp/totalrecall-amd64 /usr/local/bin/totalrecall && \
+      chmod +x /usr/local/bin/totalrecall; \
+    elif [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
+      cp /tmp/totalrecall-arm64 /usr/local/bin/totalrecall && \
+      chmod +x /usr/local/bin/totalrecall; \
+    else \
+      echo "Unsupported platform: $TARGETPLATFORM" && exit 1; \
+    fi && \
+    rm -f /tmp/totalrecall-amd64 /tmp/totalrecall-arm64
+
+# Copy entrypoint script
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
+# Switch to non-root user
+USER totalrecall
+
+WORKDIR /app
+
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
+# Default command: start daemon (can be overridden in docker-compose)
+CMD ["start"]
+
