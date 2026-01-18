@@ -144,9 +144,7 @@ async fn authorize_new(client_id: &str, client_secret: &str) -> Result<TokenInfo
     }
 
     let token_response: TokenResponse = response.json().await?;
-    let expires_at = Utc::now() + Duration::seconds(token_response.expires_in as i64 - 120);
-
-    Ok(TokenInfo {
+    let expires_at = Utc::now() + Duration::seconds(token_response.expires_in as i64 - 120);    Ok(TokenInfo {
         access_token: token_response.access_token,
         refresh_token: token_response.refresh_token,
         expires_at,

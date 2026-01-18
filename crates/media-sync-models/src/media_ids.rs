@@ -169,9 +169,7 @@ impl MediaIds {
             .or_else(|| self.tmdb_id.map(|id| format!("tmdb:{}", id)))
             .or_else(|| self.tvdb_id.map(|id| format!("tvdb:{}", id)))
             .or_else(|| self.slug.clone())
-    }
-
-    /// Check if a specific ID type is available
+    }    /// Check if a specific ID type is available
     /// 
     /// # Arguments
     /// * `id_type` - The ID type to check ("imdb", "trakt", "simkl", "tmdb", "tvdb", "slug")

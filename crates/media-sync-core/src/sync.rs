@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{RwLock, Mutex};
 use futures::future::join_all;
-use tracing::{debug, info, instrument, warn};
+use tracing::{debug, info, instrument, trace, warn};
 
 /// Registry mapping source names to their indices in the sources vector
 struct SourceRegistry {
@@ -867,7 +867,7 @@ impl SyncOrchestrator {
                                 }
                                 item.ids = Some(ids);
                             } else {
-                                warn!("ID resolution returned empty IDs for '{}' (year: {:?}). Available providers: {:?}", 
+                                trace!("ID resolution returned empty IDs for '{}' (year: {:?}). Available providers: {:?}", 
                                       item.title, item.year, available_providers);
                             }
                         }
@@ -1273,7 +1273,7 @@ impl SyncOrchestrator {
                                 }
                                 history.ids = Some(ids);
                             } else {
-                                warn!("ID resolution returned empty IDs for '{}' (year: {:?})", title, history.year);
+                                trace!("ID resolution returned empty IDs for '{}' (year: {:?})", title, history.year);
                                 history.ids = Some(MediaIds::default());
                             }
                         }

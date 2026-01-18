@@ -4,7 +4,7 @@ use media_sync_sources::{MediaSource, SourceError};
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{debug, warn};
+use tracing::{debug, trace, warn};
 use crate::id_cache::IdCache;
 use crate::id_cache_storage::IdCacheStorage;
 use crate::id_lookup::IdLookupService;
@@ -126,7 +126,7 @@ impl IdResolver {
                 match self.lookup_service.lookup_ids(sources, title, year, media_type).await {
                 Ok(looked_up_ids) => {
                     if looked_up_ids.is_empty() {
-                        warn!("ID resolution for '{}' (year: {:?}) returned empty IDs. This may be because: 1) No lookup providers are available (check authentication), 2) The title was not found in any provider, or 3) The providers returned no IDs for this title.", 
+                        trace!("ID resolution for '{}' (year: {:?}) returned empty IDs. This may be because: 1) No lookup providers are available (check authentication), 2) The title was not found in any provider, or 3) The providers returned no IDs for this title.", 
                               title, year);
                         tracing::trace!("ID resolver: Lookup returned empty MediaIds for '{}'. Queried {} provider(s): {:?}", 
                                title, provider_count, available_providers);
