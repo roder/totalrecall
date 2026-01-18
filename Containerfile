@@ -14,30 +14,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Copy workspace and crate manifests first (for dependency caching)
 COPY Cargo.toml Cargo.lock ./
-COPY crates/totalrecall-cli/Cargo.toml ./crates/totalrecall-cli/
-COPY crates/media-sync-core/Cargo.toml ./crates/media-sync-core/
-COPY crates/media-sync-models/Cargo.toml ./crates/media-sync-models/
-COPY crates/media-sync-sources/Cargo.toml ./crates/media-sync-sources/
-COPY crates/media-sync-config/Cargo.toml ./crates/media-sync-config/
-COPY crates/browser-debug/Cargo.toml ./crates/browser-debug/
+# Copy all source files (no dummy files needed - we use real source!)
+# This allows us to build dependencies which will be cached
+COPY crates/ ./crates/
 
-# Create dummy source files to allow dependency compilation
-RUN mkdir -p crates/totalrecall-cli/src && \
-    echo 'fn main() {}' > crates/totalrecall-cli/src/main.rs && \
-    mkdir -p crates/media-sync-core/src && \
-    echo '' > crates/media-sync-core/src/lib.rs && \
-    mkdir -p crates/media-sync-models/src && \
-    echo '' > crates/media-sync-models/src/lib.rs && \
-    mkdir -p crates/media-sync-sources/src && \
-    echo '' > crates/media-sync-sources/src/lib.rs && \
-    mkdir -p crates/media-sync-config/src && \
-    echo '' > crates/media-sync-config/src/lib.rs && \
-    mkdir -p crates/browser-debug/src && \
-    echo '' > crates/browser-debug/src/lib.rs
-
-# Build dependencies (this layer will be cached if Cargo.toml/Cargo.lock don't change)
-# Ensure target directory exists even if build fails
-RUN mkdir -p target && cargo build --release --package totalrecall-cli || true
+# Build everything to cache dependencies (workspace members will be rebuilt in builder stage anyway)
+# Dependencies are cached here and reused in the builder stage
+RUN cargo build --release --package totalrecall-cli || true
 
 # Stage 2: Builder - build actual binary
 FROM rust:1.89-slim as builder
@@ -50,13 +33,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy cached target directory from planner
+# Copy cached target directory from planner (contains compiled dependencies)
 COPY --from=planner /app/target /build/target
+
+# Copy workspace files
+COPY Cargo.toml Cargo.lock ./
 
 # Copy full source code
 COPY . .
 
-# Build the actual binary (only recompiles changed source, not dependencies)
+# Build the actual binary (dependencies are already compiled, so this is fast)
+# Only the workspace members will be rebuilt since dependencies are cached
 RUN cargo build --release --package totalrecall-cli
 
 # Stage 3: Runtime - minimal runtime image with headless Chromium
