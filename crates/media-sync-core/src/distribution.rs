@@ -552,7 +552,7 @@ impl TraktDistributionStrategy {
                             year: item.year,
                             watched_at: item.date_added,
                             media_type: item.media_type.clone(),
-                            source: "trakt".to_string(),
+                            source: item.source.clone(), // Preserve original source, don't hardcode target source
                         });
                     }
                 }
@@ -667,7 +667,7 @@ impl ImdbDistributionStrategy {
                             year: item.year,
                             watched_at: item.date_added,
                             media_type: item.media_type.clone(),
-                            source: "imdb".to_string(),
+                            source: item.source.clone(), // Preserve original source, don't hardcode target source
                         })
                     }
                     _ => None,
@@ -895,7 +895,7 @@ impl PlexDistributionStrategy {
                         year: item.year,
                         watched_at: item.date_added,
                         media_type: item.media_type.clone(),
-                        source: "plex".to_string(),
+                        source: item.source.clone(), // Preserve original source, don't hardcode target source
                     });
                 }
                 _ => {
