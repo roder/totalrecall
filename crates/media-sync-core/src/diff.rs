@@ -431,7 +431,16 @@ pub fn filter_reviews_by_imdb_id_and_content(
 
 impl GetImdbId for media_sync_models::WatchHistory {
     fn get_imdb_id(&self) -> String {
-        self.imdb_id.clone()
+        // First try the imdb_id field (for backward compatibility)
+        if !self.imdb_id.is_empty() {
+            self.imdb_id.clone()
+        } else {
+            // Fallback to ids.imdb_id if the string field is empty
+            self.ids
+                .as_ref()
+                .and_then(|ids| ids.imdb_id.clone())
+                .unwrap_or_default()
+        }
     }
 }
 

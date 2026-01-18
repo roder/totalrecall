@@ -358,8 +358,10 @@ impl SyncOrchestrator {
                 info!("Running mark_rated_as_watched feature ({} resolved ratings available)", resolved_data.ratings.len());
                 
                 // Build set of watched IMDB IDs from resolved watch history
+                use crate::diff::GetImdbId;
                 let watched_ids: HashSet<String> = resolved_data.watch_history.iter()
-                    .map(|h| h.imdb_id.clone())
+                    .map(|h| h.get_imdb_id())
+                    .filter(|id| !id.is_empty()) // Filter out empty IDs
                     .collect();
                 
                 let mut items_marked = 0;
@@ -1485,8 +1487,10 @@ impl SyncOrchestrator {
         // Build set of watched IMDB IDs if remove_watched_from_watchlists is enabled
         let watched_ids: std::collections::HashSet<String> = if let Some(ref config_sync_options) = self.config_sync_options {
             if config_sync_options.remove_watched_from_watchlists {
+                use crate::diff::GetImdbId;
                 resolved.watch_history.iter()
-                    .map(|h| h.imdb_id.clone())
+                    .map(|h| h.get_imdb_id())
+                    .filter(|id| !id.is_empty()) // Filter out empty IDs
                     .collect()
             } else {
                 std::collections::HashSet::new()
@@ -2542,7 +2546,11 @@ impl SyncOrchestrator {
             watched_content.extend(imdb_history.clone());
             let watched_content = crate::diff::remove_duplicates_by_imdb_id(watched_content);
 
-            let watched_ids: HashSet<String> = watched_content.iter().map(|h| h.imdb_id.clone()).collect();
+            use crate::diff::GetImdbId;
+            let watched_ids: HashSet<String> = watched_content.iter()
+                .map(|h| h.get_imdb_id())
+                .filter(|id| !id.is_empty()) // Filter out empty IDs
+                .collect();
 
             // Filter out watched items from to_set lists
             imdb_watchlist_to_set.retain(|item| !watched_ids.contains(&item.imdb_id));
