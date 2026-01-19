@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::hash::{Hash, Hasher};
 use crate::MediaType;
+use chrono::{DateTime, Utc};
 
 /// Normalized media identifiers from all sources
 /// 
@@ -8,6 +9,7 @@ use crate::MediaType;
 /// to enable flexible matching and reconciliation across platforms.
 /// 
 /// Optionally includes title, year, and media_type for title-based cache lookups.
+/// For episodes, also includes show_title, episode_title, and original_air_date.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MediaIds {
     pub imdb_id: Option<String>,
@@ -26,6 +28,17 @@ pub struct MediaIds {
     pub year: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub media_type: Option<MediaType>,
+    
+    /// Episode-specific metadata (only used when media_type is Episode)
+    /// Show title for episodes (e.g., "Code Geass" for episode "The Taste of Humiliation")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub show_title: Option<String>,
+    /// Episode title (e.g., "The Taste of Humiliation")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub episode_title: Option<String>,
+    /// Original air date of the episode
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub original_air_date: Option<DateTime<Utc>>,
 }
 
 impl MediaIds {
@@ -42,6 +55,9 @@ impl MediaIds {
             title: None,
             year: None,
             media_type: None,
+            show_title: None,
+            episode_title: None,
+            original_air_date: None,
         }
     }
 
@@ -92,6 +108,16 @@ impl MediaIds {
         }
         if self.media_type.is_none() {
             self.media_type = other.media_type.clone();
+        }
+        // Merge episode metadata
+        if self.show_title.is_none() {
+            self.show_title = other.show_title.clone();
+        }
+        if self.episode_title.is_none() {
+            self.episode_title = other.episode_title.clone();
+        }
+        if self.original_air_date.is_none() {
+            self.original_air_date = other.original_air_date;
         }
     }
 

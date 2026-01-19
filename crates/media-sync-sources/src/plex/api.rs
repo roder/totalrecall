@@ -1,5 +1,5 @@
 use anyhow::{Result, Context};
-use chrono::{DateTime, Utc, TimeZone};
+use chrono::{DateTime, NaiveDate, Utc, TimeZone};
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::Value;
@@ -79,6 +79,11 @@ pub struct PlayHistoryItem {
     pub last_viewed_at: DateTime<Utc>,
     pub title: Option<String>,
     pub year: Option<u32>,
+    pub show_title: Option<String>,
+    pub episode_title: Option<String>,
+    pub season: Option<u32>,
+    pub episode_number: Option<u32>,
+    pub original_air_date: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone)]
@@ -977,6 +982,25 @@ impl PlexHttpClient {
                         })
                         .map(|y| y as u32);
 
+                    // Extract episode-specific data for episodes
+                    let show_title = item.get("grandparentTitle").and_then(|t| t.as_str()).map(|s| s.to_string());
+                    let episode_title = if type_ == "episode" {
+                        item.get("title").and_then(|t| t.as_str()).map(|s| s.to_string())
+                    } else {
+                        None
+                    };
+                    let season = item.get("parentIndex").and_then(|s| s.as_u64()).map(|s| s as u32);
+                    let episode_number = item.get("index").and_then(|e| e.as_u64()).map(|e| e as u32);
+                    let original_air_date = item.get("originallyAvailableAt")
+                        .and_then(|d| d.as_str())
+                        .and_then(|s| {
+                            // Parse date string like "2023-07-19"
+                            chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")
+                                .ok()
+                                .and_then(|d| d.and_hms_opt(0, 0, 0))
+                                .map(|dt| DateTime::from_utc(dt, Utc))
+                        });
+
                     if idx < 3 {
                         debug!("Plex play history[{}]: rating_key={}, type={}, view_count={}, title={:?}, year={:?}", 
                                idx, rating_key, type_, view_count, title, year);
@@ -989,6 +1013,11 @@ impl PlexHttpClient {
                         last_viewed_at,
                         title,
                         year,
+                        show_title,
+                        episode_title,
+                        season,
+                        episode_number,
+                        original_air_date,
                     });
                 }
             } else {

@@ -517,7 +517,21 @@ pub async fn get_comments(
             };
 
             // Extract MediaIds
-            let media_ids = extract_media_ids_from_trakt_ids(&trakt_ids);
+            let mut media_ids = extract_media_ids_from_trakt_ids(&trakt_ids);
+            
+            // Preserve episode metadata if available
+            if let Some((show_title, episode_title, first_aired)) = episode_data {
+                media_ids.show_title = Some(show_title);
+                media_ids.episode_title = Some(episode_title);
+                // Parse first_aired date if available
+                if let Some(date_str) = first_aired {
+                    if let Ok(parsed_date) = DateTime::parse_from_rfc3339(&date_str) {
+                        media_ids.original_air_date = Some(parsed_date.with_timezone(&Utc));
+                    } else if let Ok(parsed_date) = DateTime::parse_from_str(&date_str, "%Y-%m-%d") {
+                        media_ids.original_air_date = Some(parsed_date.with_timezone(&Utc));
+                    }
+                }
+            }
             
             // Don't skip items if they have any IDs (not just imdb_id)
             if media_ids.is_empty() {
@@ -602,6 +616,8 @@ pub async fn get_watch_history(
             .send()
             .await?;
 
+            // Store episode and show data for episode metadata preservation
+            let mut episode_data: Option<(String, String, Option<String>)> = None; // (show_title, episode_title, first_aired)
         if !response.status().is_success() {
             return Err(anyhow!("Failed to fetch watch history: {}", response.status()));
         }
@@ -616,6 +632,9 @@ pub async fn get_watch_history(
         let items: Vec<TraktHistoryItem> = response.json().await?;
 
         for item in items {
+            // Store episode and show data for episode metadata preservation
+            let mut episode_data: Option<(String, String, Option<String>)> = None; // (show_title, episode_title, first_aired)
+            
             let (trakt_ids, imdb_id, media_type, _trakt_id) = match item.item_type.as_str() {
                 "movie" => {
                     let movie = item.movie.ok_or_else(|| anyhow!("Missing movie data"))?;
@@ -636,6 +655,12 @@ pub async fn get_watch_history(
                 "episode" => {
                     let episode = item.episode.ok_or_else(|| anyhow!("Missing episode data"))?;
                     let show = item.show.ok_or_else(|| anyhow!("Missing show data for episode"))?;
+                    // Store episode metadata for later use
+                    episode_data = Some((
+                        show.title.clone(),
+                        episode.title.clone(),
+                        episode.first_aired.clone(),
+                    ));
                     
                     // Track show
                     let show_trakt_id = show.ids.trakt;
@@ -668,7 +693,21 @@ pub async fn get_watch_history(
             };
 
             // Extract MediaIds
-            let media_ids = extract_media_ids_from_trakt_ids(&trakt_ids);
+            let mut media_ids = extract_media_ids_from_trakt_ids(&trakt_ids);
+            
+            // Preserve episode metadata if available
+            if let Some((show_title, episode_title, first_aired)) = episode_data {
+                media_ids.show_title = Some(show_title);
+                media_ids.episode_title = Some(episode_title);
+                // Parse first_aired date if available
+                if let Some(date_str) = first_aired {
+                    if let Ok(parsed_date) = DateTime::parse_from_rfc3339(&date_str) {
+                        media_ids.original_air_date = Some(parsed_date.with_timezone(&Utc));
+                    } else if let Ok(parsed_date) = DateTime::parse_from_str(&date_str, "%Y-%m-%d") {
+                        media_ids.original_air_date = Some(parsed_date.with_timezone(&Utc));
+                    }
+                }
+            }
             
             // Don't skip items if they have any IDs (not just imdb_id)
             if media_ids.is_empty() {
@@ -1212,8 +1251,9 @@ pub async fn search_by_title(
         }
     } else if !items.is_empty() {
         // No title/year match found, but we have results
-        warn!("Trakt search: Found {} results for '{}' (normalized: '{}') but none matched title/year", 
-              items.len(), title, normalized_title);
+        let year_str = year.map(|y| y.to_string()).unwrap_or_else(|| "None".to_string());
+        warn!("Trakt search: Found {} results for '{}' (year: {}) (normalized: '{}') but none matched title/year", 
+              items.len(), title, year_str, normalized_title);
     }
     
     Ok(None)

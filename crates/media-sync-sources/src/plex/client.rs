@@ -749,14 +749,27 @@ impl PlexClient {
         
         let media_type = match item.type_.as_str() {
             "movie" => MediaType::Movie,
-            "show" | "episode" => MediaType::Show,
+            "episode" => {
+                // For episodes, use Episode type with season/episode numbers
+                if let (Some(season), Some(episode_num)) = (item.season, item.episode_number) {
+                    MediaType::Episode { season, episode: episode_num }
+                } else {
+                    MediaType::Show  // Fallback if season/episode not available
+                }
+            },
+            "show" => MediaType::Show,
             _ => MediaType::Movie,
         };
 
         WatchlistItem {
             imdb_id,
             ids: if media_ids.is_empty() { None } else { Some(media_ids) },
-            title: item.title.clone(),
+            title: if item.type_ == "episode" {
+                // For episodes, prefer episode title, fallback to show title
+                item.episode_title.clone().or(item.show_title.clone())
+            } else {
+                item.title.clone()
+            },
             year: item.year,
             media_type,
             date_added: Utc::now(),
@@ -776,7 +789,15 @@ impl PlexClient {
         
         let media_type = match item.type_.as_str() {
             "movie" => MediaType::Movie,
-            "show" | "episode" => MediaType::Show,
+            "episode" => {
+                // For episodes, use Episode type with season/episode numbers
+                if let (Some(season), Some(episode_num)) = (item.season, item.episode_number) {
+                    MediaType::Episode { season, episode: episode_num }
+                } else {
+                    MediaType::Show  // Fallback if season/episode not available
+                }
+            },
+            "show" => MediaType::Show,
             _ => MediaType::Movie,
         };
 
@@ -874,7 +895,15 @@ impl PlexClient {
         // Only support "movie" and "show" (episodes)
         let media_type = match item.type_.as_str() {
             "movie" => MediaType::Movie,
-            "show" | "episode" => MediaType::Show,
+            "episode" => {
+                // For episodes, use Episode type with season/episode numbers
+                if let (Some(season), Some(episode_num)) = (item.season, item.episode_number) {
+                    MediaType::Episode { season, episode: episode_num }
+                } else {
+                    MediaType::Show  // Fallback if season/episode not available
+                }
+            },
+            "show" => MediaType::Show,
             _ => {
                 // Unsupported type (e.g., "track", "artist", "album")
                 // Return None to filter it out - caller will track excluded items
@@ -888,7 +917,14 @@ impl PlexClient {
         // - Can batch lookups
         // - External lookups (Trakt, Simkl) are more efficient than individual Plex API calls
         // - Avoids redundant requests when the same title appears multiple times
-        let media_ids = MediaIds::default();
+        let mut media_ids = MediaIds::default();
+        
+        // Preserve episode metadata if available
+        if item.type_ == "episode" {
+            media_ids.show_title = item.show_title.clone();
+            media_ids.episode_title = item.episode_title.clone();
+            media_ids.original_air_date = item.original_air_date;
+        }
         
         // Extract IMDB ID for backward compatibility
         let imdb_id = media_ids.imdb_id.clone().unwrap_or_default();
@@ -897,7 +933,12 @@ impl PlexClient {
         Some(WatchHistory {
             imdb_id,
             ids: Some(media_ids),
-            title: item.title.clone(),
+            title: if item.type_ == "episode" {
+                // For episodes, prefer episode title, fallback to show title
+                item.episode_title.clone().or(item.show_title.clone())
+            } else {
+                item.title.clone()
+            },
             year: item.year,
             watched_at: item.last_viewed_at,
             media_type,

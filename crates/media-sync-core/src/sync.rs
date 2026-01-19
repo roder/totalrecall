@@ -1362,15 +1362,9 @@ impl SyncOrchestrator {
             .unwrap_or(&empty_data);
 
         // Get removal list for this source (used for filtering and output)
-        // Filter out items that originated from the target source - they're already there and don't need to be shown in removal list
-        // (The removal list should only show items from other sources that need to be removed)
-        let mut removal_list = removal_lists.get(source_name).cloned().unwrap_or_default();
-        let before_filter = removal_list.len();
-        removal_list.retain(|item| item.source != source_name);
-        if before_filter > removal_list.len() {
-            debug!("Filtered out {} items from {} removal list (originated from target source)", 
-                   before_filter - removal_list.len(), source_name);
-        }
+        // Include all watched items that are in the target source's watchlist, regardless of their original source
+        // If an item is watched, it should be removed from the watchlist even if it originally came from that source
+        let removal_list = removal_lists.get(source_name).cloned().unwrap_or_default();
         
         // Prepare all data types using the distribution strategy
         let mut watchlist_result = if self.sync_options.sync_watchlist {
@@ -1749,8 +1743,9 @@ impl SyncOrchestrator {
             .unwrap_or(&empty_data);
 
         // Get removal list for this source
-        let mut removal_list = removal_lists.get(source_name).cloned().unwrap_or_default();
-        removal_list.retain(|item| item.source != source_name);
+        // Include all watched items that are in the target source's watchlist, regardless of their original source
+        // If an item is watched, it should be removed from the watchlist even if it originally came from that source
+        let removal_list = removal_lists.get(source_name).cloned().unwrap_or_default();
         
         // Prepare all data types using the distribution strategy
         let mut watchlist_result = if sync_options.sync_watchlist {
