@@ -895,18 +895,102 @@ pub async fn add_watch_history(
 
 /// Search for media by title using Simkl API
 pub async fn search_by_title(
-    _client: &Client,
+    client: &Client,
     _access_token: &str,
-    _client_id: &str,
+    client_id: &str,
     title: &str,
     year: Option<u32>,
-    _media_type: &MediaType,
+    media_type: &MediaType,
 ) -> Result<Option<media_sync_models::MediaIds>> {
-    use tracing::debug;
+    use tracing::{debug, warn};
+    use media_sync_models::MediaIds;
     
-    // Simkl doesn't appear to have a public search API endpoint
-    // Return None for now - this can be implemented if Simkl adds search support
-    debug!("Simkl search: Search not implemented for '{}' (year: {:?}) - Simkl API does not provide a public search endpoint", title, year);
+    // Determine search endpoint type based on media_type
+    let search_type = match media_type {
+        MediaType::Movie => "movies",
+        MediaType::Show => "shows",
+        MediaType::Episode { .. } => return Ok(None), // Episodes not supported in search
+    };
+    
+    // Build URL: /search/{type}?q={query}
+    let url = format!("{}/search/{}?q={}", API_BASE, search_type, urlencoding::encode(title));
+    
+    let response = client
+        .get(&url)
+        .header("simkl-api-key", client_id)
+        .header("Accept", "application/json")
+        .send()
+        .await?;
+    
+    let status = response.status();
+    
+    if !status.is_success() {
+        let error_text = response.text().await.unwrap_or_default();
+        warn!("Simkl search failed for '{}': HTTP {} - {}", title, status, error_text);
+        return Ok(None);
+    }
+    
+    // Parse response based on search type
+    let mut best_match: Option<MediaIds> = None;
+    
+    if search_type == "movies" {
+        let items: Vec<SimklMovie> = response.json().await?;
+        
+        // Find best match with validation
+        for item in &items {
+            // Check title match
+            let title_match = item.title == title;
+            
+            // Check year match if both available
+            let year_match = match (year, item.year) {
+                (Some(search_year), Some(item_year)) => search_year == item_year,
+                (None, _) | (_, None) => true,
+            };
+            
+            if title_match && year_match {
+                best_match = Some(extract_media_ids_from_simkl_ids(&item.ids));
+                break; // Exact match found
+            }
+        }
+        
+        if best_match.is_none() && !items.is_empty() {
+            let year_str = year.map(|y| y.to_string()).unwrap_or_else(|| "None".to_string());
+            warn!("Simkl search: Found {} results for '{}' (year: {}) but none matched title/year", 
+                  items.len(), title, year_str);
+        }
+    } else if search_type == "shows" {
+        let items: Vec<SimklShow> = response.json().await?;
+        
+        // Find best match with validation
+        for item in &items {
+            // Check title match
+            let title_match = item.title == title;
+            
+            // Check year match if both available
+            let year_match = match (year, item.year) {
+                (Some(search_year), Some(item_year)) => search_year == item_year,
+                (None, _) | (_, None) => true,
+            };
+            
+            if title_match && year_match {
+                best_match = Some(extract_media_ids_from_simkl_ids(&item.ids));
+                break; // Exact match found
+            }
+        }
+        
+        if best_match.is_none() && !items.is_empty() {
+            let year_str = year.map(|y| y.to_string()).unwrap_or_else(|| "None".to_string());
+            warn!("Simkl search: Found {} results for '{}' (year: {}) but none matched title/year", 
+                  items.len(), title, year_str);
+        }
+    }
+    
+    if let Some(ids) = best_match {
+        debug!("Simkl search: Found IDs for '{}': imdb={:?}, simkl={:?}", 
+               title, ids.imdb_id, ids.simkl_id);
+        return Ok(Some(ids));
+    }
+    
     Ok(None)
 }
 
