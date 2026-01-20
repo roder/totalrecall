@@ -750,12 +750,8 @@ impl PlexClient {
         let media_type = match item.type_.as_str() {
             "movie" => MediaType::Movie,
             "episode" => {
-                // For episodes, use Episode type with season/episode numbers
-                if let (Some(season), Some(episode_num)) = (item.season, item.episode_number) {
-                    MediaType::Episode { season, episode: episode_num }
-                } else {
-                    MediaType::Show  // Fallback if season/episode not available
-                }
+                // For episodes, use Episode type - season/episode not available in WatchlistItem
+                MediaType::Show  // Fallback since WatchlistItem doesn't have season/episode
             },
             "show" => MediaType::Show,
             _ => MediaType::Movie,
@@ -764,12 +760,7 @@ impl PlexClient {
         WatchlistItem {
             imdb_id,
             ids: if media_ids.is_empty() { None } else { Some(media_ids) },
-            title: if item.type_ == "episode" {
-                // For episodes, prefer episode title, fallback to show title
-                item.episode_title.clone().or(item.show_title.clone())
-            } else {
-                item.title.clone()
-            },
+            title: item.title.clone(),
             year: item.year,
             media_type,
             date_added: Utc::now(),
@@ -790,12 +781,8 @@ impl PlexClient {
         let media_type = match item.type_.as_str() {
             "movie" => MediaType::Movie,
             "episode" => {
-                // For episodes, use Episode type with season/episode numbers
-                if let (Some(season), Some(episode_num)) = (item.season, item.episode_number) {
-                    MediaType::Episode { season, episode: episode_num }
-                } else {
-                    MediaType::Show  // Fallback if season/episode not available
-                }
+                // For episodes, use Episode type - season/episode not available in RatingItem
+                MediaType::Show  // Fallback since RatingItem doesn't have season/episode
             },
             "show" => MediaType::Show,
             _ => MediaType::Movie,
@@ -917,14 +904,11 @@ impl PlexClient {
         // - Can batch lookups
         // - External lookups (Trakt, Simkl) are more efficient than individual Plex API calls
         // - Avoids redundant requests when the same title appears multiple times
-        let mut media_ids = MediaIds::default();
+        let media_ids = MediaIds::default();
         
-        // Preserve episode metadata if available
-        if item.type_ == "episode" {
-            media_ids.show_title = item.show_title.clone();
-            media_ids.episode_title = item.episode_title.clone();
-            media_ids.original_air_date = item.original_air_date;
-        }
+        // Note: Episode metadata (show_title, episode_title, original_air_date) 
+        // is no longer stored in MediaIds. This information is available in the 
+        // source data structures but not persisted in the ID cache.
         
         // Extract IMDB ID for backward compatibility
         let imdb_id = media_ids.imdb_id.clone().unwrap_or_default();

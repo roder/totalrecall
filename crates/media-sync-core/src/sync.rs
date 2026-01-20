@@ -858,7 +858,26 @@ impl SyncOrchestrator {
                         &item.media_type,
                         None,
                     ).await {
-                        Ok(ids) => {
+                        Ok((ids, rx)) => {
+                            // Spawn background task to cache additional results if channel provided
+                            if let Some(mut rx) = rx {
+                                let resolver_clone = Arc::clone(&id_resolver);
+                                let title = item.title.clone();
+                                let year = item.year;
+                                let media_type = item.media_type.clone();
+                                
+                                tokio::spawn(async move {
+                                    while let Some(additional_ids) = rx.recv().await {
+                                        resolver_clone.lock().await.cache_ids_with_metadata(
+                                            additional_ids,
+                                            Some(&title),
+                                            year,
+                                            Some(&media_type)
+                                        );
+                                    }
+                                });
+                            }
+                            
                             if !ids.is_empty() {
                                 tracing::trace!("Resolved IDs for '{}': imdb={:?}, tmdb={:?}, tvdb={:?}", 
                                        item.title, ids.imdb_id, ids.tmdb_id, ids.tvdb_id);
@@ -1264,7 +1283,26 @@ impl SyncOrchestrator {
                         &history.media_type,
                         None,
                     ).await {
-                        Ok(ids) => {
+                        Ok((ids, rx)) => {
+                            // Spawn background task to cache additional results if channel provided
+                            if let Some(mut rx) = rx {
+                                let resolver_clone = Arc::clone(&id_resolver);
+                                let title = title.to_string();
+                                let year = history.year;
+                                let media_type = history.media_type.clone();
+                                
+                                tokio::spawn(async move {
+                                    while let Some(additional_ids) = rx.recv().await {
+                                        resolver_clone.lock().await.cache_ids_with_metadata(
+                                            additional_ids,
+                                            Some(&title),
+                                            year,
+                                            Some(&media_type)
+                                        );
+                                    }
+                                });
+                            }
+                            
                             if !ids.is_empty() {
                                 tracing::trace!("Resolved IDs for '{}': imdb={:?}, tmdb={:?}, tvdb={:?}", 
                                        title, ids.imdb_id, ids.tmdb_id, ids.tvdb_id);

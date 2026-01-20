@@ -87,32 +87,20 @@ async fn refresh_access_token(
         refresh_token: token_response.refresh_token,
         expires_at,
     })
-}
-
-async fn authorize_new(client_id: &str, client_secret: &str) -> Result<TokenInfo> {
+}async fn authorize_new(client_id: &str, client_secret: &str) -> Result<TokenInfo> {
     // Generate authorization URL
     let auth_url = format!(
         "{}?response_type=code&client_id={}&redirect_uri={}",
         AUTHORIZE_URL, client_id, REDIRECT_URI
-    );
-
-    println!("\nPlease visit the following URL to authorize this application:");
-    println!("{}\n", auth_url);
-
-    // Prompt for authorization code
+    );    println!("\nPlease visit the following URL to authorize this application:");
+    println!("{}\n", auth_url);    // Prompt for authorization code
     use std::io::{self, Write};
     print!("Please enter the authorization code from the URL: ");
-    io::stdout().flush()?;
-
-    let mut code = String::new();
+    io::stdout().flush()?;    let mut code = String::new();
     io::stdin().read_line(&mut code)?;
-    let code = code.trim();
-
-    if code.is_empty() {
+    let code = code.trim();    if code.is_empty() {
         return Err(anyhow!("Authorization code cannot be empty"));
-    }
-
-    // Exchange code for tokens
+    }    // Exchange code for tokens
     let client = create_trakt_client();
     let payload = serde_json::json!({
         "code": code,
@@ -120,9 +108,7 @@ async fn authorize_new(client_id: &str, client_secret: &str) -> Result<TokenInfo
         "client_secret": client_secret,
         "redirect_uri": REDIRECT_URI,
         "grant_type": "authorization_code"
-    });
-
-    let response = client
+    });    let response = client
         .post(TOKEN_URL)
         .json(&payload)
         .header("Accept", "application/json")
@@ -131,9 +117,7 @@ async fn authorize_new(client_id: &str, client_secret: &str) -> Result<TokenInfo
         .header("Origin", "https://trakt.tv")
         .header("Referer", "https://trakt.tv/")
         .send()
-        .await?;
-
-    if !response.status().is_success() {
+        .await?;    if !response.status().is_success() {
         let status = response.status();
         let error_text = response.text().await.unwrap_or_default();
         return Err(anyhow!(
@@ -141,9 +125,7 @@ async fn authorize_new(client_id: &str, client_secret: &str) -> Result<TokenInfo
             status,
             error_text
         ));
-    }
-
-    let token_response: TokenResponse = response.json().await?;
+    }    let token_response: TokenResponse = response.json().await?;
     let expires_at = Utc::now() + Duration::seconds(token_response.expires_in as i64 - 120);    Ok(TokenInfo {
         access_token: token_response.access_token,
         refresh_token: token_response.refresh_token,

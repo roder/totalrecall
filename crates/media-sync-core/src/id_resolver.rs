@@ -84,6 +84,10 @@ impl IdResolver {
     /// 2. Falls back to title-based lookup if IDs are missing
     /// 3. Merges with existing cache entries
     /// 4. Updates cache
+    /// 
+    /// # Returns
+    /// * `Ok((MediaIds, Some(Receiver)))` - Resolved IDs with channel receiver for additional results (when early return occurred)
+    /// * `Ok((MediaIds, None))` - Resolved IDs without channel (when all results were merged)
     pub async fn resolve_ids_for_item(
         &mut self,
         sources: &[Arc<RwLock<Box<dyn MediaSource<Error = SourceError>>>>],
@@ -91,7 +95,7 @@ impl IdResolver {
         year: Option<u32>,
         media_type: &MediaType,
         existing_imdb_id: Option<&str>,
-    ) -> Result<MediaIds> {
+    ) -> Result<(MediaIds, Option<tokio::sync::mpsc::Receiver<MediaIds>>)> {
         let mut ids = MediaIds::default();
         
         // Step 1: If we already have an imdb_id, use it as starting point
@@ -99,7 +103,7 @@ impl IdResolver {
             ids.imdb_id = Some(imdb_id.to_string());
             // Check cache for existing mappings
             if let Some(cached) = self.cache.find_by_any_id(imdb_id) {
-                return Ok((*cached).clone());
+                return Ok(((*cached).clone(), None));
             }
         }
         
@@ -108,7 +112,7 @@ impl IdResolver {
             // Check persistent cache by title/year before doing external lookup
             if let Some(cached) = self.cache.find_by_title_year(title, year, media_type) {
                 tracing::trace!("ID resolver: Found '{}' (year: {:?}) in persistent cache by title/year, using cached IDs", title, year);
-                return Ok((*cached).clone());
+                return Ok(((*cached).clone(), None));
             }
             
             // Debug: Log why title/year lookup failed
@@ -123,8 +127,21 @@ impl IdResolver {
                 let available_providers = self.lookup_service.available_providers();
                 let provider_count = available_providers.len();
                 
-                match self.lookup_service.lookup_ids(sources, title, year, media_type).await {
-                Ok(looked_up_ids) => {
+                // Get cached IDs from title/year lookup (if any) to pass to lookup service
+                let cached_ids = self.cache.find_by_title_year(title, year, media_type);
+                
+                // Default to "imdb" as required ID type, but this could be made configurable
+                let required_id_type = "imdb";
+                
+                match self.lookup_service.lookup_ids(
+                    sources, 
+                    title, 
+                    year, 
+                    media_type,
+                    cached_ids.as_ref().map(|arc| arc.as_ref()),
+                    Some(required_id_type),
+                ).await {
+                Ok((looked_up_ids, rx)) => {
                     if looked_up_ids.is_empty() {
                         trace!("ID resolution for '{}' (year: {:?}) returned empty IDs. This may be because: 1) No lookup providers are available (check authentication), 2) The title was not found in any provider, or 3) The providers returned no IDs for this title.", 
                               title, year);
@@ -220,6 +237,27 @@ impl IdResolver {
                                    title, looked_up_ids.imdb_id, looked_up_ids.trakt_id, looked_up_ids.tmdb_id, looked_up_ids.tvdb_id);
                         }
                     }
+                    
+                    // Return with channel receiver if available (for background cache updates)
+                    let channel_rx = rx;
+                    
+                    // Step 3: Update cache with title/year metadata for future lookups
+                    // Only insert if we haven't already inserted it above (when found in cache)
+                    if !ids.is_empty() {
+                        // Check if metadata is already set (meaning we already inserted it above)
+                        let needs_insert = ids.title.is_none() || ids.year.is_none() || ids.media_type.is_none();
+                        if needs_insert {
+                            // Add title/year metadata to IDs before caching
+                            let mut ids_with_metadata = ids.clone();
+                            ids_with_metadata.title = Some(title.to_string());
+                            ids_with_metadata.year = year;
+                            ids_with_metadata.media_type = Some(media_type.clone());
+                            self.cache.insert(ids_with_metadata);
+                            self.inserts_since_save += 1;
+                        }
+                    }
+                    
+                    return Ok((ids, channel_rx));
                 }
                 Err(e) => {
                     warn!("ID lookup failed for '{}': {}. Queried {} provider(s): {:?}", 
@@ -245,7 +283,7 @@ impl IdResolver {
             }
         }
         
-        Ok(ids)
+        Ok((ids, None))
     }
     
     /// Find MediaIds by any ID type
