@@ -430,6 +430,16 @@ impl SyncOrchestrator {
             "Sync operation completed"
         );
 
+        // Cleanup sources (e.g., shutdown browser instances) before returning
+        // This ensures resources are freed when sync job completes, minimizing consumption during scheduler idle
+        for source_arc in &self.sources {
+            let mut source = source_arc.write().await;
+            if let Err(e) = source.as_mut().cleanup().await {
+                warn!("Failed to cleanup source {}: {}", source.source_name(), e);
+                errors.push(format!("Failed to cleanup source {}: {}", source.source_name(), e));
+            }
+        }
+
         Ok(SyncResult {
             items_synced,
             duration,

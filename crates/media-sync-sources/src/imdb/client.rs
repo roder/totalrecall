@@ -13,6 +13,8 @@ use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
 use which::which;
 use futures::StreamExt;
+use futures::future::BoxFuture;
+use futures::FutureExt;
 use browser_debug::PageInspector;
 
 pub struct ImdbClient {
@@ -327,7 +329,21 @@ impl ImdbClient {
             .arg("--disable-third-party-cookies")  // Privacy
             .arg("--log-level=3")  // Reduce logging
             .arg("--disable-features=WebAuthentication")  // Disable WebAuthn/passkey to force password authentication
-            .arg(format!("--download-directory={}", download_dir.display()));  // Set default download directory
+            .arg(format!("--download-directory={}", download_dir.display()))  // Set default download directory
+            // Memory optimization flags
+            .arg("--memory-pressure-off")  // Disable memory pressure handling
+            .arg("--aggressive-cache-discard")  // Aggressively discard cache
+            .arg("--disk-cache-size=1")  // Minimize disk cache (1MB)
+            .arg("--disable-features=site-per-process")  // Reduce process isolation overhead
+            .arg("--js-flags=--optimize_for_size")  // Optimize JS for memory footprint
+            // CPU optimization flags
+            .arg("--disable-background-timer-throttling")  // Prevent background throttling
+            .arg("--disable-renderer-backgrounding")  // Keep renderer active
+            .arg("--disable-backgrounding-occluded-windows")  // Keep windows active
+            .arg("--disable-plugins")  // Disable plugin system
+            .arg("--disable-sync")  // Disable Chrome sync
+            .arg("--disable-default-apps")  // Disable default apps
+            .arg("--window-size=800,600");  // Smaller viewport = less memory for rendering
         
         // Platform-specific flags
         if is_docker {
@@ -343,10 +359,8 @@ impl ImdbClient {
         if is_macos && !is_docker {
             builder = builder
                 .arg("--disable-setuid-sandbox")  // macOS doesn't support setuid sandbox
-                .arg("--disable-background-networking")  // Reduce background activity
-                .arg("--disable-background-timer-throttling")  // Prevent throttling
-                .arg("--disable-renderer-backgrounding")  // Keep renderer active
-                .arg("--disable-backgrounding-occluded-windows");  // Keep windows active
+                .arg("--disable-background-networking");  // Reduce background activity
+            // Note: CPU optimization flags are now in common flags section above
         }
         
         // User data directory (for persistent sessions)
@@ -450,14 +464,42 @@ impl ImdbClient {
         Ok(())
     }
     
+    /// Configure resource blocking to reduce CPU and memory usage
+    /// Blocks non-essential resources like images, CSS, fonts, and media
+    async fn configure_resource_blocking(page: &Page) -> Result<()> {
+        use chromiumoxide::cdp::browser_protocol::network::SetBlockedUrLsParams;
+        
+        // Block non-essential resources
+        let blocked_patterns: Vec<String> = vec![
+            "*.jpg", "*.jpeg", "*.png", "*.gif", "*.webp",  // Images
+            "*.css",  // Stylesheets (if not needed for functionality)
+            "*.woff", "*.woff2", "*.ttf", "*.otf",  // Fonts
+            "*.mp4", "*.webm", "*.mp3",  // Media
+        ].into_iter().map(|s| s.to_string()).collect();
+        
+        let params = SetBlockedUrLsParams {
+            urls: blocked_patterns,
+        };
+        
+        page.execute(params).await
+            .map_err(|e| anyhow!("Failed to configure resource blocking: {}", e))?;
+        
+        debug!("Resource blocking configured for page");
+        Ok(())
+    }
+    
     pub async fn authenticate(&mut self) -> Result<()> {
         let browser = self.browser.as_ref()
             .ok_or_else(|| anyhow!("Browser not initialized"))?;
         
-        let page = browser.new_page("about:blank").await?;
+        let username = self.username.clone();
+        let password = self.password.clone();
         
-        // Use auth module to authenticate
-        auth::authenticate(&page, &self.username, &self.password).await?;
+        Self::with_page(browser, "about:blank", false, |page| async move {
+            // Use auth module to authenticate
+            auth::authenticate(page, &username, &password).await?;
+            Ok(())
+        }.boxed()).await?;
         
         self.authenticated = true;
         Ok(())
@@ -465,6 +507,26 @@ impl ImdbClient {
     
     pub fn is_authenticated(&self) -> bool {
         self.authenticated
+    }
+    
+    /// Explicitly shutdown the browser instance
+    /// Should be called when sync job completes to free resources
+    pub async fn shutdown(&mut self) -> Result<()> {
+        if let Some(browser) = self.browser.take() {
+            info!("Shutting down browser instance");
+            
+            // Wait for handler task to complete
+            if let Some(handler_task) = self.handler_task.take() {
+                // Give handler a moment to finish
+                let _ = tokio::time::timeout(Duration::from_secs(2), handler_task).await;
+            }
+            
+            // Browser will be closed when dropped
+            drop(browser);
+            info!("Browser instance shut down");
+        }
+        
+        Ok(())
     }
     
     /// Convert IMDB rating (1-10 with 0.5 increments) to Trakt (1-10 integer)
@@ -546,6 +608,69 @@ impl ImdbClient {
             }
         }
     }
+    
+    /// Helper to execute an operation with a page, ensuring it's always closed
+    /// This prevents page leaks even when errors occur
+    async fn with_page<F, R>(
+        browser: &Browser,
+        url: &str,
+        block_resources: bool,
+        operation: F,
+    ) -> Result<R>
+    where
+        F: for<'a> FnOnce(&'a Page) -> BoxFuture<'a, Result<R>>,
+    {
+        let page = browser.new_page(url).await?;
+        
+        // Configure resource blocking if requested
+        if block_resources {
+            if let Err(e) = Self::configure_resource_blocking(&page).await {
+                warn!("Failed to configure resource blocking: {}", e);
+            }
+        }
+        
+        // Execute the operation - page lives for the entire duration
+        let result = operation(&page).await;
+        
+        // Always close the page, even on error
+        if let Err(e) = page.close().await {
+            warn!("Failed to close page: {}", e);
+        }
+        
+        result
+    }
+    
+    /// Helper for MediaSource trait methods that return SourceError
+    /// Ensures page is always closed even when errors occur
+    async fn with_page_source_error<F, R>(
+        browser: &Browser,
+        url: &str,
+        block_resources: bool,
+        operation: F,
+    ) -> Result<R, crate::error::SourceError>
+    where
+        F: for<'a> FnOnce(&'a Page) -> BoxFuture<'a, Result<R, crate::error::SourceError>>,
+    {
+        let page = browser.new_page(url).await
+            .map_err(|e| crate::error::SourceError::new(format!("Failed to create new page: {}", e)))?;
+        
+        // Configure resource blocking if requested
+        if block_resources {
+            if let Err(e) = Self::configure_resource_blocking(&page).await {
+                warn!("Failed to configure resource blocking: {}", e);
+            }
+        }
+        
+        // Execute the operation - page lives for the entire duration
+        let result = operation(&page).await;
+        
+        // Always close the page, even on error
+        if let Err(e) = page.close().await {
+            warn!("Failed to close page: {}", e);
+        }
+        
+        result
+    }
 }
 
 impl Drop for ImdbClient {
@@ -595,86 +720,85 @@ impl MediaSource for ImdbClient {
             .map_err(|e| crate::error::SourceError::new(format!("Browser health check failed before watchlist download: {}", e)))?;
         
         // Check if watchlist is empty first by navigating to the watchlist page
-        let check_page = browser.new_page("https://www.imdb.com/list/watchlist").await
-            .map_err(|e| crate::error::SourceError::new(format!("Failed to create new page (browser may have crashed): {}", e)))?;
-        
-        // Wait longer for page to fully load
-        sleep(Duration::from_secs(3)).await;
-        
-        // Wait for page to be interactive - check if body has content
-        let mut load_attempts = 0;
-        while load_attempts < 10 {
-            let body_ready = match check_page.evaluate("document.body && document.body.innerText.length > 0").await {
+        let is_empty = Self::with_page_source_error(browser, "https://www.imdb.com/list/watchlist", false, |check_page| async move {
+            // Wait longer for page to fully load
+            sleep(Duration::from_secs(3)).await;
+            
+            // Wait for page to be interactive - check if body has content
+            let mut load_attempts = 0;
+            while load_attempts < 10 {
+                let body_ready = match check_page.evaluate("document.body && document.body.innerText.length > 0").await {
+                    Ok(result) => {
+                        result.value()
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false)
+                    }
+                    Err(_) => false,
+                };
+                
+                if body_ready {
+                    break;
+                }
+                sleep(Duration::from_millis(500)).await;
+                load_attempts += 1;
+            }
+            
+            // Check for empty state
+            let page_text = match check_page.evaluate("document.body.innerText").await {
                 Ok(result) => {
                     result.value()
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(false)
+                        .and_then(|v| v.as_str().map(|s| s.to_lowercase()))
+                        .unwrap_or_default()
                 }
-                Err(_) => false,
+                Err(_) => String::new(),
             };
             
-            if body_ready {
-                break;
-            }
-            sleep(Duration::from_millis(500)).await;
-            load_attempts += 1;
-        }
-        
-        // Check for empty state
-        let page_text = match check_page.evaluate("document.body.innerText").await {
-            Ok(result) => {
-                result.value()
-                    .and_then(|v| v.as_str().map(|s| s.to_lowercase()))
-                    .unwrap_or_default()
-            }
-            Err(_) => String::new(),
-        };
-        
-        // Check for the exact empty state message first (most reliable)
-        // Based on actual IMDB HTML: <div class="sc-b9995ff0-4 fTcYPM">This list is empty.</div>
-        let mut is_empty = page_text.contains("this list is empty");
-        
-        // Also check for the specific empty state element by class
-        // The class may be dynamically generated, so we verify text content
-        if !is_empty {
-            let empty_selectors = [
-                ".sc-b9995ff0-4",  // The specific class for empty state
-                "[data-testid='empty-watchlist']",
-                ".empty-state",
-                ".ipc-empty-state",
-            ];
+            // Check for the exact empty state message first (most reliable)
+            // Based on actual IMDB HTML: <div class="sc-b9995ff0-4 fTcYPM">This list is empty.</div>
+            let mut is_empty = page_text.contains("this list is empty");
             
-            for selector in &empty_selectors {
-                match check_page.find_element(*selector).await {
-                    Ok(element) => {
-                        // Verify it contains the empty text
-                        if let Ok(Some(text)) = element.inner_text().await {
-                            if text.to_lowercase().contains("this list is empty") 
-                                || text.to_lowercase().contains("list is empty") {
-                                is_empty = true;
-                                break;
+            // Also check for the specific empty state element by class
+            // The class may be dynamically generated, so we verify text content
+            if !is_empty {
+                let empty_selectors = [
+                    ".sc-b9995ff0-4",  // The specific class for empty state
+                    "[data-testid='empty-watchlist']",
+                    ".empty-state",
+                    ".ipc-empty-state",
+                ];
+                
+                for selector in &empty_selectors {
+                    match check_page.find_element(*selector).await {
+                        Ok(element) => {
+                            // Verify it contains the empty text
+                            if let Ok(Some(text)) = element.inner_text().await {
+                                if text.to_lowercase().contains("this list is empty") 
+                                    || text.to_lowercase().contains("list is empty") {
+                                    is_empty = true;
+                                    break;
+                                }
                             }
                         }
+                        Err(_) => continue,
                     }
-                    Err(_) => continue,
                 }
             }
-        }
-        
-        // Check for other common empty state text patterns
-        if !is_empty {
-            let empty_indicators = [
-                "your watchlist is empty",
-                "no titles in your watchlist",
-                "add titles to your watchlist",
-                "start building your watchlist",
-                "nothing in your watchlist",
-            ];
             
-            is_empty = empty_indicators.iter().any(|indicator| page_text.contains(*indicator));
-        }
-        
-        check_page.close().await.ok();
+            // Check for other common empty state text patterns
+            if !is_empty {
+                let empty_indicators = [
+                    "your watchlist is empty",
+                    "no titles in your watchlist",
+                    "add titles to your watchlist",
+                    "start building your watchlist",
+                    "nothing in your watchlist",
+                ];
+                
+                is_empty = empty_indicators.iter().any(|indicator| page_text.contains(*indicator));
+            }
+            
+            Ok(is_empty)
+        }.boxed()).await?;
         
         if is_empty {
             info!("IMDB watchlist is empty, returning empty list without downloading CSV");
@@ -685,52 +809,45 @@ impl MediaSource for ImdbClient {
         export::generate_exports(browser, true, false, false, false, false).await
             .map_err(|e| crate::error::SourceError::new(format!("Failed to generate IMDB watchlist export: {}", e)))?;
         
-        // Create a new page for downloading (exports page)
-        let page = browser.new_page("https://www.imdb.com/exports/").await
-            .map_err(|e| crate::error::SourceError::new(format!("Failed to create new page: {}", e)))?;
-        
-        // Configure downloads on THIS page before attempting download
-        Self::configure_downloads(&page, &self.download_dir).await
-            .map_err(|e| crate::error::SourceError::new(format!("Failed to configure downloads: {}", e)))?;
-        
-        // Wait a moment for the page to fully load and configuration to take effect
-        sleep(Duration::from_secs(2)).await;
-        
         // Check browser health before download
-        if let Err(e) = Self::check_browser_health(browser).await {
-            page.close().await.ok();
-            return Err(crate::error::SourceError::new(format!("Browser health check failed before watchlist download: {}", e)));
-        }
+        Self::check_browser_health(browser).await
+            .map_err(|e| crate::error::SourceError::new(format!("Browser health check failed before watchlist download: {}", e)))?;
         
+        // Create a new page for downloading (exports page) with resource blocking
+        let download_dir = self.download_dir.clone();
         let cache = self.downloaded_files.lock().unwrap().clone();
-        let files = match download::download_exports(&page, &self.download_dir, true, false, false, false, false, &cache).await {
-            Ok(files) => files,
-            Err(e) => {
-                let error_msg = format!("{}", e);
-                page.close().await.ok();
-                
-                // Check browser health after download failure (async check)
-                let health_check_future = Self::check_browser_health(browser);
-                let health_msg = match tokio::time::timeout(Duration::from_secs(2), health_check_future).await {
-                    Ok(Ok(_)) => String::new(),
-                    Ok(Err(he)) => format!(" Browser appears to have crashed: {}.", he),
-                    Err(_) => " Browser health check timed out (browser may have crashed).".to_string(),
-                };
-                
-                // If export is not available (likely empty), return empty list
-                if error_msg.contains("Export not available") || error_msg.contains("not available") {
-                    info!("Watchlist export not available (likely empty), returning empty list");
-                    return Ok(vec![]);
-                }
-                return Err(crate::error::SourceError::new(format!("Failed to download IMDB watchlist export: {}.{}", e, health_msg)));
-            }
-        };
+        
+        let files = Self::with_page_source_error(browser, "https://www.imdb.com/exports/", true, |page| async move {
+            // Configure downloads on THIS page before attempting download
+            Self::configure_downloads(page, &download_dir).await
+                .map_err(|e| crate::error::SourceError::new(format!("Failed to configure downloads: {}", e)))?;
+            
+            // Wait a moment for the page to fully load and configuration to take effect
+            sleep(Duration::from_secs(2)).await;
+            
+            download::download_exports(page, &download_dir, true, false, false, false, false, &cache).await
+                .map_err(|e| {
+                    let error_msg = format!("{}", e);
+                    
+                    // If export is not available (likely empty), return special error
+                    if error_msg.contains("Export not available") || error_msg.contains("not available") {
+                        return crate::error::SourceError::new("EXPORT_NOT_AVAILABLE".to_string());
+                    }
+                    
+                    crate::error::SourceError::new(format!("Failed to download IMDB watchlist export: {}", e))
+                })
+        }.boxed()).await?;
+        
         // Update cache with downloaded files
         if let Some(ref path) = files.watchlist {
             self.downloaded_files.lock().unwrap().insert("watchlist".to_string(), path.clone());
         }
-
-        page.close().await.map_err(|e| crate::error::SourceError::new(format!("{}", e)))?;
+        
+        // Handle export not available case
+        if files.watchlist.is_none() {
+            info!("Watchlist export not available (likely empty), returning empty list");
+            return Ok(vec![]);
+        }
 
         if let Some(path) = files.watchlist {
             // Verify file exists before caching
@@ -809,41 +926,32 @@ impl MediaSource for ImdbClient {
         Self::check_browser_health(browser).await
             .map_err(|e| crate::error::SourceError::new(format!("Browser health check failed after export generation: {}", e)))?;
         
-        // Create a new page for downloading (exports page)
-        let page = browser.new_page("https://www.imdb.com/exports/").await
-            .map_err(|e| crate::error::SourceError::new(format!("Failed to create new page (browser may have crashed): {}", e)))?;
-        
-        // Configure downloads on THIS page before attempting download
-        Self::configure_downloads(&page, &self.download_dir).await
-            .map_err(|e| crate::error::SourceError::new(format!("Failed to configure downloads: {}", e)))?;
-        
-        // Wait a moment for the page to fully load and configuration to take effect
-        sleep(Duration::from_secs(2)).await;
-        
         // Check browser health before download
         Self::check_browser_health(browser).await
             .map_err(|e| crate::error::SourceError::new(format!("Browser health check failed before download: {}", e)))?;
         
+        // Create a new page for downloading (exports page) with resource blocking
+        let download_dir = self.download_dir.clone();
         let cache = self.downloaded_files.lock().unwrap().clone();
-        let files = match download::download_exports(&page, &self.download_dir, false, true, false, false, false, &cache).await {
-            Ok(files) => files,
-            Err(e) => {
-                // Check browser health after download failure
-                let health_check_future = Self::check_browser_health(browser);
-                let health_msg = match tokio::time::timeout(Duration::from_secs(2), health_check_future).await {
-                    Ok(Ok(_)) => String::new(),
-                    Ok(Err(he)) => format!(" Browser appears to have crashed: {}.", he),
-                    Err(_) => " Browser health check timed out (browser may have crashed).".to_string(),
-                };
-                return Err(crate::error::SourceError::new(format!("Failed to download IMDB ratings export: {}.{}", e, health_msg)));
-            }
-        };
+        
+        let files = Self::with_page_source_error(browser, "https://www.imdb.com/exports/", true, |page| async move {
+            // Configure downloads on THIS page before attempting download
+            Self::configure_downloads(page, &download_dir).await
+                .map_err(|e| crate::error::SourceError::new(format!("Failed to configure downloads: {}", e)))?;
+            
+            // Wait a moment for the page to fully load and configuration to take effect
+            sleep(Duration::from_secs(2)).await;
+            
+            download::download_exports(page, &download_dir, false, true, false, false, false, &cache).await
+                .map_err(|e| {
+                    crate::error::SourceError::new(format!("Failed to download IMDB ratings export: {}", e))
+                })
+        }.boxed()).await?;
+        
         // Update cache with downloaded files
         if let Some(ref path) = files.ratings {
             self.downloaded_files.lock().unwrap().insert("ratings".to_string(), path.clone());
         }
-
-        page.close().await.map_err(|e| crate::error::SourceError::new(format!("{}", e)))?;
 
         if let Some(path) = files.ratings {
             // Verify file exists before caching
@@ -909,14 +1017,11 @@ impl MediaSource for ImdbClient {
 
     async fn get_reviews(&self) -> Result<Vec<Review>, Self::Error> {
         let browser = self.browser.as_ref().ok_or_else(|| crate::error::SourceError::new("Browser not initialized".to_string()))?;
-        let page = browser.new_page("about:blank").await
-            .map_err(|e| crate::error::SourceError::new(format!("Failed to create new page: {}", e)))?;
         
-        let reviews = reviews::scrape_reviews(&page).await
-            .map_err(|e| crate::error::SourceError::new(format!("Failed to scrape IMDB reviews: {}", e)))?;
-        
-        page.close().await.map_err(|e| crate::error::SourceError::new(format!("{}", e)))?;
-        Ok(reviews)
+        Self::with_page_source_error(browser, "about:blank", false, |page| async move {
+            reviews::scrape_reviews(page).await
+                .map_err(|e| crate::error::SourceError::new(format!("Failed to scrape IMDB reviews: {}", e)))
+        }.boxed()).await
     }
 
     async fn get_watch_history(&self) -> Result<Vec<WatchHistory>, Self::Error> {
@@ -934,43 +1039,32 @@ impl MediaSource for ImdbClient {
         Self::check_browser_health(browser).await
             .map_err(|e| crate::error::SourceError::new(format!("Browser health check failed after check-ins export generation: {}", e)))?;
         
-        // Create a new page for downloading (exports page)
-        let page = browser.new_page("https://www.imdb.com/exports/").await
-            .map_err(|e| crate::error::SourceError::new(format!("Failed to create new page (browser may have crashed): {}", e)))?;
-        
-        // Configure downloads on THIS page before attempting download
-        Self::configure_downloads(&page, &self.download_dir).await
-            .map_err(|e| crate::error::SourceError::new(format!("Failed to configure downloads: {}", e)))?;
-        
-        // Wait a moment for the page to fully load and configuration to take effect
-        sleep(Duration::from_secs(2)).await;
-        
         // Check browser health before download
-        if let Err(e) = Self::check_browser_health(browser).await {
-            page.close().await.ok();
-            return Err(crate::error::SourceError::new(format!("Browser health check failed before check-ins download: {}", e)));
-        }
+        Self::check_browser_health(browser).await
+            .map_err(|e| crate::error::SourceError::new(format!("Browser health check failed before check-ins download: {}", e)))?;
         
+        // Create a new page for downloading (exports page) with resource blocking
+        let download_dir = self.download_dir.clone();
         let cache = self.downloaded_files.lock().unwrap().clone();
-        let files = match download::download_exports(&page, &self.download_dir, false, false, true, false, false, &cache).await {
-            Ok(files) => files,
-            Err(e) => {
-                // Check browser health after download failure
-                let health_check_future = Self::check_browser_health(browser);
-                let health_msg = match tokio::time::timeout(Duration::from_secs(2), health_check_future).await {
-                    Ok(Ok(_)) => String::new(),
-                    Ok(Err(he)) => format!(" Browser appears to have crashed: {}.", he),
-                    Err(_) => " Browser health check timed out (browser may have crashed).".to_string(),
-                };
-                return Err(crate::error::SourceError::new(format!("Failed to download IMDB check-ins export: {}.{}", e, health_msg)));
-            }
-        };
+        
+        let files = Self::with_page_source_error(browser, "https://www.imdb.com/exports/", true, |page| async move {
+            // Configure downloads on THIS page before attempting download
+            Self::configure_downloads(page, &download_dir).await
+                .map_err(|e| crate::error::SourceError::new(format!("Failed to configure downloads: {}", e)))?;
+            
+            // Wait a moment for the page to fully load and configuration to take effect
+            sleep(Duration::from_secs(2)).await;
+            
+            download::download_exports(page, &download_dir, false, false, true, false, false, &cache).await
+                .map_err(|e| {
+                    crate::error::SourceError::new(format!("Failed to download IMDB check-ins export: {}", e))
+                })
+        }.boxed()).await?;
+        
         // Update cache with downloaded files
         if let Some(ref path) = files.checkins {
             self.downloaded_files.lock().unwrap().insert("check-ins".to_string(), path.clone());
         }
-
-        page.close().await.map_err(|e| crate::error::SourceError::new(format!("{}", e)))?;
 
         if let Some(path) = files.checkins {
             // Verify file exists before caching
@@ -1036,91 +1130,94 @@ impl MediaSource for ImdbClient {
 
     async fn add_to_watchlist(&self, items: &[WatchlistItem]) -> Result<(), Self::Error> {
         let browser = self.browser.as_ref().ok_or_else(|| crate::error::SourceError::new("Browser not initialized".to_string()))?;
-        let page = browser.new_page("about:blank").await
-            .map_err(|e| crate::error::SourceError::new(format!("Failed to create new page: {}", e)))?;
+        let items = items.to_vec();
         
-        actions::add_to_watchlist(&page, items).await
-            .map_err(|e| crate::error::SourceError::new(format!("{}", e)))?;
-        
-        page.close().await.map_err(|e| crate::error::SourceError::new(format!("{}", e)))?;
-        Ok(())
+        Self::with_page_source_error(browser, "about:blank", false, |page| async move {
+            actions::add_to_watchlist(page, &items).await
+                .map_err(|e| crate::error::SourceError::new(format!("{}", e)))
+        }.boxed()).await
     }
 
     async fn remove_from_watchlist(&self, items: &[WatchlistItem]) -> Result<(), Self::Error> {
         let browser = self.browser.as_ref().ok_or_else(|| crate::error::SourceError::new("Browser not initialized".to_string()))?;
-        let page = browser.new_page("about:blank").await
-            .map_err(|e| crate::error::SourceError::new(format!("Failed to create new page: {}", e)))?;
+        let items = items.to_vec();
         
-        actions::remove_from_watchlist(&page, items).await
-            .map_err(|e| crate::error::SourceError::new(format!("{}", e)))?;
-        
-        page.close().await.map_err(|e| crate::error::SourceError::new(format!("{}", e)))?;
-        Ok(())
+        Self::with_page_source_error(browser, "about:blank", false, |page| async move {
+            actions::remove_from_watchlist(page, &items).await
+                .map_err(|e| crate::error::SourceError::new(format!("{}", e)))
+        }.boxed()).await
     }
 
     async fn set_ratings(&self, ratings: &[Rating]) -> Result<(), Self::Error> {
         let browser = self.browser.as_ref().ok_or_else(|| crate::error::SourceError::new("Browser not initialized".to_string()))?;
-        let page = browser.new_page("about:blank").await
-            .map_err(|e| crate::error::SourceError::new(format!("Failed to create new page: {}", e)))?;
+        let ratings = ratings.to_vec();
+        let debug_config = self.debug_config.clone();
+        let debug_enabled = debug_config.is_enabled();
         
-        // Initialize PageInspector if debug is enabled
-        let mut inspector_opt = if self.debug_config.is_enabled() {
-            match PageInspector::new(page.clone(), self.debug_config.clone()) {
-                Ok(inspector) => {
-                    info!("Browser debugging enabled, output directory: {:?}", self.debug_config.output_dir());
-                    Some(inspector)
+        Self::with_page_source_error(browser, "about:blank", false, |page| async move {
+            // Initialize PageInspector if debug is enabled
+            let mut inspector_opt = if debug_enabled {
+                match PageInspector::new(page.clone(), debug_config.clone()) {
+                    Ok(inspector) => {
+                        info!("Browser debugging enabled, output directory: {:?}", debug_config.output_dir());
+                        Some(inspector)
+                    }
+                    Err(e) => {
+                        warn!("Failed to initialize PageInspector: {}", e);
+                        None
+                    }
                 }
-                Err(e) => {
-                    warn!("Failed to initialize PageInspector: {}", e);
-                    None
-                }
-            }
-        } else {
-            None
-        };
-        
-        actions::set_ratings(&page, ratings, inspector_opt.as_mut()).await
-            .map_err(|e| crate::error::SourceError::new(format!("{}", e)))?;
-        
-        page.close().await.map_err(|e| crate::error::SourceError::new(format!("{}", e)))?;
-        Ok(())
+            } else {
+                None
+            };
+            
+            actions::set_ratings(page, &ratings, inspector_opt.as_mut()).await
+                .map_err(|e| crate::error::SourceError::new(format!("{}", e)))?;
+            
+            Ok(())
+        }.boxed()).await
     }
 
     async fn set_reviews(&self, reviews: &[Review]) -> Result<(), Self::Error> {
         let browser = self.browser.as_ref().ok_or_else(|| crate::error::SourceError::new("Browser not initialized".to_string()))?;
-        let page = browser.new_page("about:blank").await
-            .map_err(|e| crate::error::SourceError::new(format!("Failed to create new page: {}", e)))?;
         
-        // Get last submitted date from credentials
+        // Get last submitted date from credentials before page operation
         let path_manager = media_sync_config::PathManager::default();
         let credentials_file = path_manager.credentials_file();
         let mut cred_store = media_sync_config::CredentialStore::new(credentials_file);
         let last_submitted = cred_store.load().ok()
             .and_then(|_| cred_store.get_imdb_reviews_last_submitted());
         
-        actions::set_reviews(&page, reviews, last_submitted).await
-            .map_err(|e| crate::error::SourceError::new(format!("{}", e)))?;
+        let reviews = reviews.to_vec();
+        let reviews_empty = reviews.is_empty();
         
-        // Update last submitted date if reviews were successfully submitted
-        if !reviews.is_empty() {
-            cred_store.set_imdb_reviews_last_submitted(chrono::Utc::now());
-            let _ = cred_store.save();
-        }
-        
-        page.close().await.map_err(|e| crate::error::SourceError::new(format!("{}", e)))?;
-        Ok(())
+        Self::with_page_source_error(browser, "about:blank", false, |page| async move {
+            actions::set_reviews(page, &reviews, last_submitted).await
+                .map_err(|e| crate::error::SourceError::new(format!("{}", e)))?;
+            
+            // Update last submitted date if reviews were successfully submitted
+            if !reviews_empty {
+                cred_store.set_imdb_reviews_last_submitted(chrono::Utc::now());
+                let _ = cred_store.save();
+            }
+            
+            Ok(())
+        }.boxed()).await
     }
 
     async fn add_watch_history(&self, items: &[WatchHistory]) -> Result<(), Self::Error> {
         let browser = self.browser.as_ref().ok_or_else(|| crate::error::SourceError::new("Browser not initialized".to_string()))?;
-        let page = browser.new_page("about:blank").await
-            .map_err(|e| crate::error::SourceError::new(format!("Failed to create new page: {}", e)))?;
+        let items = items.to_vec();
         
-        actions::add_watch_history(&page, items).await
-            .map_err(|e| crate::error::SourceError::new(format!("{}", e)))?;
-        
-        page.close().await.map_err(|e| crate::error::SourceError::new(format!("{}", e)))?;
-        Ok(())
+        Self::with_page_source_error(browser, "about:blank", false, |page| async move {
+            actions::add_watch_history(page, &items).await
+                .map_err(|e| crate::error::SourceError::new(format!("{}", e)))
+        }.boxed()).await
+    }
+    
+    async fn cleanup(&mut self) -> Result<(), Self::Error> {
+        self.shutdown().await
+            .map_err(|e| crate::error::SourceError::new(format!("Failed to shutdown browser: {}", e)))
     }
 
 }

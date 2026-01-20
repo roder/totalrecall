@@ -16,25 +16,35 @@ pub async fn generate_exports(
 ) -> Result<()> {
     let page = browser.new_page("https://www.imdb.com").await?;
 
-    // Generate watchlist export if needed
-    if sync_watchlist || remove_watched_from_watchlists {
-        let _export_generated = generate_watchlist_export(&page).await?;
+    // Ensure page is closed even on error
+    let result = async {
+        // Generate watchlist export if needed
+        if sync_watchlist || remove_watched_from_watchlists {
+            let _export_generated = generate_watchlist_export(&page).await?;
+        }
+
+        // Generate ratings export if needed
+        if sync_ratings || mark_rated_as_watched {
+            generate_ratings_export(&page).await?;
+        }
+
+        // Generate check-ins export if needed
+        if sync_watch_history || remove_watched_from_watchlists || mark_rated_as_watched {
+            generate_checkins_export(&page).await?;
+        }
+
+        // Wait for exports to be ready
+        wait_for_exports_ready(&page).await?;
+
+        Ok(())
+    }.await;
+
+    // Always close the page, even on error
+    if let Err(e) = page.close().await {
+        warn!("Failed to close page after generate_exports: {}", e);
     }
 
-    // Generate ratings export if needed
-    if sync_ratings || mark_rated_as_watched {
-        generate_ratings_export(&page).await?;
-    }
-
-    // Generate check-ins export if needed
-    if sync_watch_history || remove_watched_from_watchlists || mark_rated_as_watched {
-        generate_checkins_export(&page).await?;
-    }
-
-    // Wait for exports to be ready
-    wait_for_exports_ready(&page).await?;
-
-    Ok(())
+    result
 }
 
 /// Check if watchlist is empty by looking for empty state indicators

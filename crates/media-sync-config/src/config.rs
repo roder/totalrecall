@@ -161,6 +161,10 @@ pub struct SchedulerConfig {
     pub timezone: String,
     #[serde(default = "default_true")]
     pub run_on_startup: bool,
+    /// Force a full sync on startup (ignores incremental sync timestamps)
+    /// If false, full sync will only run if no sync timestamps exist (first run)
+    #[serde(default = "default_false")]
+    pub force_full_sync_on_startup: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -180,6 +184,10 @@ fn default_true() -> bool {
     true
 }
 
+fn default_false() -> bool {
+    false
+}
+
 fn default_schedule() -> String {
     "0 */6 * * *".to_string()  // Every 6 hours
 }
@@ -193,6 +201,7 @@ pub fn default_scheduler_config() -> SchedulerConfig {
         schedule: default_schedule(),
         timezone: default_timezone(),
         run_on_startup: default_true(),
+        force_full_sync_on_startup: default_false(),
     }
 }
 

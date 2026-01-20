@@ -11,12 +11,14 @@ pub struct Scheduler {
     scheduler: JobScheduler,
     orchestrator: SyncOrchestrator,
     config: media_sync_config::SchedulerConfig,
+    cred_store: media_sync_config::CredentialStore,
 }
 
 impl Scheduler {
     pub async fn new(
         orchestrator: SyncOrchestrator,
         config: media_sync_config::SchedulerConfig,
+        cred_store: media_sync_config::CredentialStore,
     ) -> Result<Self> {
         let sched = JobScheduler::new().await?;
 
@@ -24,6 +26,7 @@ impl Scheduler {
             scheduler: sched,
             orchestrator,
             config,
+            cred_store,
         })
     }
 
@@ -34,8 +37,26 @@ impl Scheduler {
                 operation = "scheduler_startup",
                 "Running initial sync on startup"
             );
-            // Force full sync on startup
-            self.orchestrator.set_force_full_sync(true);
+            
+            // Determine if we should force full sync:
+            // 1. If config explicitly says to force full sync on startup
+            // 2. If no sync timestamps exist (first run)
+            let should_force_full_sync = if self.config.force_full_sync_on_startup {
+                info!("Forcing full sync on startup (config: force_full_sync_on_startup = true)");
+                true
+            } else {
+                // Check if any sync timestamps exist
+                let has_sync_timestamps = self.has_any_sync_timestamps();
+                if !has_sync_timestamps {
+                    info!("Forcing full sync on startup (no sync timestamps found - first run)");
+                    true
+                } else {
+                    info!("Using incremental sync on startup (sync timestamps found)");
+                    false
+                }
+            };
+            
+            self.orchestrator.set_force_full_sync(should_force_full_sync);
             self.run_sync().await?;
             // Reset to incremental sync for scheduled runs
             self.orchestrator.set_force_full_sync(false);
@@ -78,6 +99,23 @@ impl Scheduler {
     async fn run_sync(&mut self) -> Result<media_sync_core::SyncResult> {
         self.orchestrator.sync().await
             .map_err(|e| color_eyre::eyre::eyre!("Sync operation failed in daemon: {}", e))
+    }
+    
+    /// Check if any sync timestamps exist in the credential store
+    /// Returns true if at least one sync timestamp exists for any source/data_type combination
+    fn has_any_sync_timestamps(&self) -> bool {
+        let sources = ["trakt", "imdb", "simkl", "plex"];
+        let data_types = ["watchlist", "ratings", "reviews", "watch_history"];
+        
+        for source in &sources {
+            for data_type in &data_types {
+                if self.cred_store.get_last_sync_timestamp(source, data_type).is_some() {
+                    return true;
+                }
+            }
+        }
+        
+        false
     }
 }
 
@@ -247,16 +285,17 @@ async fn run_daemon_internal(
         schedule,
         timezone,
         run_on_startup,
+        force_full_sync_on_startup: scheduler_config_from_file.force_full_sync_on_startup,
     };
     
     // Create sync options from config (same as manual sync command)
-    // Default to incremental syncs (force_full_sync=false), will be set to true for startup sync if needed
+    // Default to incremental syncs (force_full_sync=false), will be set conditionally for startup sync
     let sync_options = media_sync_core::SyncOptions {
         sync_watchlist: config.sync.sync_watchlist,
         sync_ratings: config.sync.sync_ratings,
         sync_reviews: config.sync.sync_reviews,
         sync_watch_history: config.sync.sync_watch_history,
-        force_full_sync: false, // Will be set to true for startup sync, false for scheduled syncs
+        force_full_sync: false, // Will be set conditionally for startup sync, false for scheduled syncs
     };
     
     let orchestrator = SyncOrchestrator::new(
@@ -267,8 +306,8 @@ async fn run_daemon_internal(
         .with_sync_options(sync_options)
         .with_config_sync_options(config.sync.clone());
 
-    // Create and start scheduler
-    let mut scheduler = Scheduler::new(orchestrator, scheduler_config).await
+    // Create and start scheduler (pass credential store for timestamp checking)
+    let mut scheduler = Scheduler::new(orchestrator, scheduler_config, cred_store).await
         .map_err(|e| color_eyre::eyre::eyre!("Failed to create scheduler: {}", e))?;
     scheduler.start().await
         .map_err(|e| color_eyre::eyre::eyre!("Failed to start scheduler: {}", e))?;

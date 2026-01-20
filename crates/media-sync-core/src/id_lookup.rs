@@ -1,4 +1,7 @@
 use anyhow::Result;
+use futures::future::BoxFuture;
+use futures::stream::{FuturesUnordered, StreamExt};
+use futures::FutureExt;
 use media_sync_models::{MediaIds, MediaType};
 use media_sync_sources::{MediaSource, SourceError};
 use std::collections::HashMap;
@@ -80,9 +83,9 @@ impl IdLookupService {
     
     /// Look up IDs using all available providers
     /// 
-    /// Queries all providers concurrently and returns immediately when the first result
-    /// contains the required ID. Remaining results are sent via a channel receiver for
-    /// background processing and cache updates.
+    /// Queries all providers concurrently using FuturesUnordered and returns immediately
+    /// when the first result contains the required ID. If no required ID is found in any
+    /// result, all results are merged and returned.
     /// 
     /// # Arguments
     /// * `sources` - All available media sources (to access providers)
@@ -127,14 +130,12 @@ impl IdLookupService {
                title, year, media_type, required_id_type, self.providers.len(),
                self.providers.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>());
         
-        // Create channels for results
-        let (result_tx, mut result_rx) = mpsc::channel(10);
-        let (additional_tx, additional_rx) = mpsc::channel(10);
-        
-        // Spawn all provider lookups as separate concurrent tasks
-        let mut task_count = 0;
+        // Build FuturesUnordered for concurrent execution
+        // Use BoxFuture to allow different async blocks to have the same type
+        let mut futures: FuturesUnordered<BoxFuture<'_, (String, Result<Option<MediaIds>, SourceError>)>> = FuturesUnordered::new();
         let search_timestamps = self.search_timestamps.clone();
         let search_cooldown = self.search_cooldown;
+        let (additional_tx, additional_rx) = mpsc::channel(10);
         
         for (provider_name, _priority) in &self.providers {
             // Find the source that provides this lookup
@@ -143,9 +144,7 @@ impl IdLookupService {
                 let provider_name = provider_name.clone();
                 let title = title.to_string();
                 let media_type = media_type.clone();
-                let result_tx = result_tx.clone();
                 let search_timestamps = search_timestamps.clone();
-                let required_id_type = required_id_type.to_string();
                 
                 // Create cache key for this search (per provider)
                 let cache_key = Self::make_cache_key(&provider_name, &title, year, &media_type);
@@ -155,11 +154,7 @@ impl IdLookupService {
                     let timestamps = search_timestamps.read().await;
                     if let Some(last_search) = timestamps.get(&cache_key) {
                         if let Ok(elapsed) = SystemTime::now().duration_since(*last_search) {
-                            if elapsed < search_cooldown {
-                                true
-                            } else {
-                                false
-                            }
+                            elapsed < search_cooldown
                         } else {
                             false
                         }
@@ -177,9 +172,10 @@ impl IdLookupService {
                         .unwrap_or_else(|| "unknown".to_string());
                     debug!("ID lookup: Skipping {} search for '{}' (year: {}) - last searched {} ago (within 7-day cooldown)", 
                            &provider_name, &title, year_str, elapsed);
-                    // Send None to indicate skipped search
-                    let _ = result_tx.send((provider_name, Ok(None))).await;
-                    task_count += 1;
+                    // Add a future that returns None immediately for skipped searches
+                    futures.push(async move {
+                        (provider_name, Ok(None))
+                    }.boxed());
                     break;
                 }
                 
@@ -194,97 +190,98 @@ impl IdLookupService {
                     timestamps.insert(cache_key.clone(), SystemTime::now());
                 }
                 
-                tokio::spawn(async move {
+                // Create future for this provider lookup
+                let future = async move {
                     let source_guard = source_arc.read().await;
-                    if source_guard.source_name() == provider_name.as_str() {
+                    let result = if source_guard.source_name() == provider_name.as_str() {
                         if let Some(provider) = source_guard.as_id_lookup_provider() {
-                            match provider.lookup_ids(&title, year, &media_type).await {
-                                Ok(Some(ids)) => {
-                                    tracing::trace!("ID lookup via {} found IDs: imdb={:?}, trakt={:?}, tmdb={:?}", 
-                                           &provider_name, ids.imdb_id, ids.trakt_id, ids.tmdb_id);
-                                    let _ = result_tx.send((provider_name, Ok(Some(ids)))).await;
-                                }
-                                Ok(None) => {
-                                    // No matches - this is normal, don't log
-                                    let _ = result_tx.send((provider_name, Ok(None))).await;
-                                }
-                                Err(e) => {
-                                    warn!("ID lookup via {} failed for '{}' (year: {:?}): {}", 
-                                          &provider_name, title, year, e);
-                                    let _ = result_tx.send((provider_name, Err(e))).await;
-                                }
-                            }
+                            provider.lookup_ids(&title, year, &media_type).await
+                                .map_err(|e| SourceError::new(e.to_string()))
                         } else {
                             warn!("ID lookup: Source '{}' does not provide IdLookupProvider trait", &provider_name);
-                            let _ = result_tx.send((provider_name, Ok(None))).await;
+                            Ok(None)
                         }
                     } else {
-                        let _ = result_tx.send((provider_name, Ok(None))).await;
+                        Ok(None)
+                    };
+                    
+                    match result {
+                        Ok(Some(ids)) => {
+                            tracing::trace!("ID lookup via {} found IDs: imdb={:?}, trakt={:?}, tmdb={:?}", 
+                                   &provider_name, ids.imdb_id, ids.trakt_id, ids.tmdb_id);
+                            (provider_name, Ok(Some(ids)))
+                        }
+                        Ok(None) => {
+                            (provider_name, Ok(None))
+                        }
+                        Err(e) => {
+                            warn!("ID lookup via {} failed for '{}' (year: {:?}): {}", 
+                                  &provider_name, title, year, e);
+                            (provider_name, Err(e))
+                        }
                     }
-                });
-                task_count += 1;
+                }.boxed();
+                
+                futures.push(future);
                 break; // Found the source, move to next provider
             }
         }
         
-        // Process results as they arrive
+        // Process results as they arrive using StreamExt
         let mut merged_ids = MediaIds::default();
         let mut errors = Vec::new();
-        let mut found_required_id = false;
-        let mut remaining_count = task_count;
+        let mut remaining_results = Vec::new();
+        let mut found_early = false;
+        let mut early_result: Option<MediaIds> = None;
         
-        // Use a loop that we can break out of when we find the required ID
-        loop {
-            match result_rx.recv().await {
-                Some((provider_name, result)) => {
-                    remaining_count -= 1;
-                    
-                    match result {
-                        Ok(Some(ids)) if Self::has_required_id(&ids, required_id_type) && !found_required_id => {
-                            // First result with required ID - return immediately
-                            found_required_id = true;
-                            let additional_tx_clone = additional_tx.clone();
-                            
-                            // Drop the original result_tx to signal we're done with it
-                            // (cloned senders in tasks will keep channel alive)
-                            drop(result_tx);
-                            
-                            // Spawn task to forward remaining results to additional channel
-                            // We can now move result_rx into the spawned task
-                            tokio::spawn(async move {
-                                while let Some((_, result)) = result_rx.recv().await {
-                                    if let Ok(Some(ids)) = result {
-                                        let _ = additional_tx_clone.send(ids).await; // Ignore errors if receiver dropped
-                                    }
-                                }
-                            });
-                            
-                            return Ok((ids, Some(additional_rx)));
-                        }
-                        Ok(Some(ids)) => {
-                            merged_ids.merge(&ids);
-                        }
-                        Ok(None) => {
-                            // No matches - this is normal
-                        }
-                        Err(e) => {
-                            errors.push(format!("{}: {}", provider_name, e));
-                        }
-                    }
-                    
-                    // If all tasks completed and we haven't found required ID, break
-                    if remaining_count == 0 {
-                        break;
+        while let Some((provider_name, result)) = futures.next().await {
+            match result {
+                Ok(Some(ids)) if Self::has_required_id(&ids, required_id_type) && !found_early => {
+                    // First result with required ID - return immediately
+                    found_early = true;
+                    early_result = Some(ids);
+                    // Break out of loop - remaining futures will complete in background
+                    // but we won't process them since we have what we need
+                    break;
+                }
+                Ok(Some(ids)) => {
+                    if found_early {
+                        // We already found the required ID, collect remaining for channel
+                        remaining_results.push(ids);
+                    } else {
+                        merged_ids.merge(&ids);
+                        remaining_results.push(ids);
                     }
                 }
-                None => {
-                    // Channel closed (all senders dropped)
-                    break;
+                Ok(None) => {
+                    // No matches - this is normal
+                }
+                Err(e) => {
+                    errors.push(format!("{}: {}", provider_name, e));
                 }
             }
         }
         
+        // If we found the required ID early, return immediately
+        if let Some(ids) = early_result {
+            // Spawn task to collect remaining results and send to channel
+            let additional_tx_clone = additional_tx.clone();
+            tokio::spawn(async move {
+                // Continue processing any remaining futures
+                // Note: futures stream is consumed, so we just send what we collected
+                for ids in remaining_results {
+                    let _ = additional_tx_clone.send(ids).await;
+                }
+            });
+            return Ok((ids, Some(additional_rx)));
+        }
+        
         // No required ID found - return merged results
+        // Send remaining results to channel for background processing
+        for ids in remaining_results {
+            let _ = additional_tx.send(ids).await;
+        }
+        
         if !errors.is_empty() && merged_ids.is_empty() {
             return Err(anyhow::anyhow!(
                 "All ID lookups failed: {}",

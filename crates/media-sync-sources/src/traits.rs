@@ -49,5 +49,11 @@ pub trait MediaSource: Send + Sync + CapabilityRegistry {
     async fn set_ratings(&self, ratings: &[Rating]) -> Result<(), Self::Error>;
     async fn set_reviews(&self, reviews: &[Review]) -> Result<(), Self::Error>;
     async fn add_watch_history(&self, items: &[WatchHistory]) -> Result<(), Self::Error>;
+    
+    // Cleanup/shutdown (optional - default implementation does nothing)
+    // Called when sync job completes to free resources (e.g., close browser instances)
+    async fn cleanup(&mut self) -> Result<(), Self::Error> {
+        Ok(())
+    }
 }
 
