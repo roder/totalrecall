@@ -36,13 +36,36 @@ impl ImdbClient {
     }
     
     pub async fn new_with_debug(username: String, password: String, debug_config: browser_debug::config::DebugConfig) -> Result<Self> {
-        // Find system Chromium
-        let mut chrome_path = Self::find_system_chromium();
-        
         // Setup directories
         let user_data_dir = Self::get_user_data_dir()?;
         let session_id = Self::generate_session_id();
         let download_dir = Self::get_download_dir(&session_id)?;
+        
+        // Initialize browser
+        let (browser, handler_task) = Self::initialize_browser_internal(&user_data_dir, &download_dir).await?;
+        
+        Ok(Self {
+            browser: Some(browser),
+            handler_task: Some(handler_task),
+            authenticated: false,
+            username,
+            password,
+            download_dir,
+            user_data_dir,
+            session_id,
+            downloaded_files: std::sync::Mutex::new(std::collections::HashMap::new()),
+            debug_config,
+        })
+    }
+    
+    /// Internal helper to initialize the browser instance
+    /// This is called both during construction and for lazy initialization
+    async fn initialize_browser_internal(
+        user_data_dir: &Path,
+        download_dir: &Path,
+    ) -> Result<(Browser, tokio::task::JoinHandle<()>)> {
+        // Find system Chromium
+        let mut chrome_path = Self::find_system_chromium();
         
         // If no system Chromium found, use BrowserFetcher to download it
         // Based on: https://github.com/mattsse/chromiumoxide?tab=readme-ov-file#fetcher
@@ -96,8 +119,8 @@ impl ImdbClient {
         // Build browser config with the found/downloaded Chromium
         let config = Self::build_browser_config(
             chrome_path.as_ref().map(|p| p.clone()),
-            &user_data_dir,
-            &download_dir,
+            user_data_dir,
+            download_dir,
         )?;
         
         // Launch browser
@@ -157,18 +180,37 @@ impl ImdbClient {
             }
         });
         
-        Ok(Self {
-            browser: Some(browser),
-            handler_task: Some(handler_task),
-            authenticated: false,
-            username,
-            password,
-            download_dir,
-            user_data_dir,
-            session_id,
-            downloaded_files: std::sync::Mutex::new(std::collections::HashMap::new()),
-            debug_config,
-        })
+        Ok((browser, handler_task))
+    }
+    
+    /// Ensure browser is initialized, initializing it lazily if needed
+    /// This allows the browser to be re-initialized after shutdown for subsequent syncs
+    async fn ensure_browser_initialized(&mut self) -> Result<()> {
+        if self.browser.is_some() {
+            // Browser already initialized
+            return Ok(());
+        }
+        
+        info!("Browser not initialized, initializing lazily...");
+        
+        // Generate new session ID and download directory for this sync
+        let session_id = Self::generate_session_id();
+        let download_dir = Self::get_download_dir(&session_id)?;
+        
+        // Initialize browser
+        let (browser, handler_task) = Self::initialize_browser_internal(&self.user_data_dir, &download_dir).await?;
+        
+        // Update client state
+        self.browser = Some(browser);
+        self.handler_task = Some(handler_task);
+        self.session_id = session_id;
+        self.download_dir = download_dir;
+        
+        // Reset authentication state since we have a new browser instance
+        self.authenticated = false;
+        
+        info!("Browser initialized successfully");
+        Ok(())
     }
     
     /// Check if we're running in Docker
@@ -489,6 +531,9 @@ impl ImdbClient {
     }
     
     pub async fn authenticate(&mut self) -> Result<()> {
+        // Ensure browser is initialized (lazy initialization)
+        self.ensure_browser_initialized().await?;
+        
         let browser = self.browser.as_ref()
             .ok_or_else(|| anyhow!("Browser not initialized"))?;
         
