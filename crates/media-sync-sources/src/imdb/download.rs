@@ -52,13 +52,23 @@ pub async fn download_exports(
                 files.watchlist = Some(cached_path.clone());
             } else {
                 // Cached file no longer exists, re-download
-                if let Ok(path) = download_csv(page, download_dir, "watchlist", cached_files).await {
-                    files.watchlist = Some(path);
+                match download_csv(page, download_dir, "watchlist", cached_files).await {
+                    Ok(path) => {
+                        files.watchlist = Some(path);
+                    }
+                    Err(e) => {
+                        warn!("Failed to download watchlist CSV: {}", e);
+                    }
                 }
             }
         } else {
-            if let Ok(path) = download_csv(page, download_dir, "watchlist", cached_files).await {
-                files.watchlist = Some(path);
+            match download_csv(page, download_dir, "watchlist", cached_files).await {
+                Ok(path) => {
+                    files.watchlist = Some(path);
+                }
+                Err(e) => {
+                    warn!("Failed to download watchlist CSV: {}", e);
+                }
             }
         }
     }
@@ -71,13 +81,23 @@ pub async fn download_exports(
                 info!("Reusing cached ratings CSV: {:?}", cached_path);
                 files.ratings = Some(cached_path.clone());
             } else {
-                if let Ok(path) = download_csv(page, download_dir, "ratings", cached_files).await {
-                    files.ratings = Some(path);
+                match download_csv(page, download_dir, "ratings", cached_files).await {
+                    Ok(path) => {
+                        files.ratings = Some(path);
+                    }
+                    Err(e) => {
+                        warn!("Failed to download ratings CSV: {}", e);
+                    }
                 }
             }
         } else {
-            if let Ok(path) = download_csv(page, download_dir, "ratings", cached_files).await {
-                files.ratings = Some(path);
+            match download_csv(page, download_dir, "ratings", cached_files).await {
+                Ok(path) => {
+                    files.ratings = Some(path);
+                }
+                Err(e) => {
+                    warn!("Failed to download ratings CSV: {}", e);
+                }
             }
         }
     }
@@ -90,13 +110,23 @@ pub async fn download_exports(
                 info!("Reusing cached check-ins CSV: {:?}", cached_path);
                 files.checkins = Some(cached_path.clone());
             } else {
-                if let Ok(path) = download_csv(page, download_dir, "check-ins", cached_files).await {
-                    files.checkins = Some(path);
+                match download_csv(page, download_dir, "check-ins", cached_files).await {
+                    Ok(path) => {
+                        files.checkins = Some(path);
+                    }
+                    Err(e) => {
+                        warn!("Failed to download check-ins CSV: {}", e);
+                    }
                 }
             }
         } else {
-            if let Ok(path) = download_csv(page, download_dir, "check-ins", cached_files).await {
-                files.checkins = Some(path);
+            match download_csv(page, download_dir, "check-ins", cached_files).await {
+                Ok(path) => {
+                    files.checkins = Some(path);
+                }
+                Err(e) => {
+                    warn!("Failed to download check-ins CSV: {}", e);
+                }
             }
         }
     }
@@ -125,22 +155,28 @@ async fn download_csv(
         debug!("Export item {} text: {}", idx, text);
         
         if text.to_lowercase().contains(file_type) {
-            debug!("Found matching item for {}: {}", file_type, text);
+            info!("Found matching export item for {}: {}", file_type, text);
             
             // Check if export is unavailable (e.g., "no export available", "export not available")
             let text_lower = text.to_lowercase();
             if text_lower.contains("no export available") 
                 || text_lower.contains("export not available")
                 || text_lower.contains("unavailable") {
-                info!("Export for {} is not available (likely empty list), skipping download", file_type);
-                return Err(anyhow!("Export not available for {}", file_type));
+                warn!("Export for {} is not available (likely empty list or export not ready). Item text: {}", file_type, text);
+                return Err(anyhow!("Export not available for {}: {}", file_type, text));
+            }
+            
+            // Check if export is still in progress
+            if text_lower.contains("in progress") {
+                warn!("Export for {} is still in progress. Item text: {}", file_type, text);
+                return Err(anyhow!("Export for {} is still in progress. Wait for it to complete before downloading.", file_type));
             }
             
             // Find download button (matching Python: button[data-testid*='export-status-button'])
             let button_selector = "button[data-testid*='export-status-button']";
             match item.find_element(button_selector).await {
                 Ok(button) => {
-                    debug!("Found download button for {}", file_type);
+                    info!("Found download button for {}", file_type);
                     
                     // Scroll into view (matching Python: driver.execute_script("arguments[0].scrollIntoView(true);", csv_link))
                     button.scroll_into_view().await?;
@@ -224,11 +260,16 @@ async fn download_csv(
                     let csv_file = if let Some(file) = csv_file {
                         file
                     } else {
+                        warn!("No new CSV file detected after {} seconds of polling. File may not have downloaded, or download may have taken longer than expected.", max_attempts);
                         debug!("No new file detected in configured directory, searching common download locations");
                         // Try configured directory first
                         match find_latest_csv(download_dir) {
-                            Ok(file) => file,
-                            Err(_) => {
+                            Ok(file) => {
+                                info!("Found existing CSV file in download directory (may be from previous download): {:?}", file);
+                                file
+                            }
+                            Err(e) => {
+                                debug!("No CSV files found in configured download directory: {}", e);
                                 // Try common download locations
                                 let mut search_dirs = vec![];
                                 
@@ -270,7 +311,8 @@ async fn download_csv(
                                 }
                                 
                                 found_file.ok_or_else(|| {
-                                    anyhow!("No CSV file found in configured directory ({:?}) or common download locations", download_dir)
+                                    warn!("CSV file for {} not found after download. Checked: configured directory ({:?}) and {} common download locations", file_type, download_dir, search_dirs.len());
+                                    anyhow!("No CSV file found in configured directory ({:?}) or common download locations after clicking download button. The export may not have been ready, or the download may have failed.", download_dir)
                                 })?
                             }
                         }
@@ -325,14 +367,24 @@ async fn download_csv(
                     return Ok(dest_path);
                 }
                 Err(e) => {
-                    debug!("Button not found in item {}: {}", idx, e);
+                    warn!("Download button not found in export item {} for {}: {}. Item text: {}", idx, file_type, e, text);
                 }
             }
         }
     }
 
-    warn!("No export button found for {} after checking {} items", file_type, items.len());
-    Err(anyhow!("No export button found for {}", file_type))
+    warn!("No export item matching '{}' found after checking {} items on exports page", file_type, items.len());
+    if items.is_empty() {
+        warn!("No export items found on page at all. The exports page may not have loaded correctly, or there may be no exports available.");
+    } else {
+        debug!("Available export items on page:");
+        for (idx, item) in items.iter().enumerate() {
+            if let Ok(text) = item.inner_text().await {
+                debug!("  Item {}: {}", idx, text.unwrap_or_default());
+            }
+        }
+    }
+    Err(anyhow!("No export button found for {} after checking {} items", file_type, items.len()))
 }
 
 fn find_latest_csv(dir: &Path) -> Result<PathBuf> {

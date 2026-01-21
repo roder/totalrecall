@@ -2,7 +2,7 @@ use anyhow::Result;
 use chromiumoxide::{Browser, Page};
 use std::time::Duration;
 use tokio::time::sleep;
-use tracing::{info, warn};
+use tracing::{info, warn, debug};
 
 /// Generate IMDB CSV exports for watchlist, ratings, and check-ins
 /// Returns when all exports are ready (or timeout)
@@ -31,6 +31,8 @@ pub async fn generate_exports(
         // Generate check-ins export if needed
         if sync_watch_history || remove_watched_from_watchlists || mark_rated_as_watched {
             generate_checkins_export(&page).await?;
+            // Give check-ins export extra time to register before navigating to exports page
+            sleep(Duration::from_secs(2)).await;
         }
 
         // Wait for exports to be ready
@@ -107,11 +109,76 @@ async fn is_watchlist_empty(page: &Page) -> Result<bool> {
     Ok(false)
 }
 
+/// Wait for page to be fully loaded by checking document.readyState
+async fn wait_for_page_load(page: &Page) -> Result<()> {
+    const PAGE_LOAD_TIMEOUT: Duration = Duration::from_secs(30);
+    let ready_script = "document.readyState === 'complete'";
+    
+    let start = std::time::Instant::now();
+    while start.elapsed() < PAGE_LOAD_TIMEOUT {
+        match page.evaluate(ready_script).await {
+            Ok(result) => {
+                if let Some(value) = result.value() {
+                    if value.as_bool().unwrap_or(false) {
+                        return Ok(());
+                    }
+                }
+            }
+            Err(_) => {}
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+    
+    // Even if timeout, continue (page might still be usable)
+    warn!("Page ready state check timed out, continuing anyway");
+    Ok(())
+}
+
+/// Wait for network activity to settle after an action (like clicking export button)
+/// This ensures the export request has been sent before navigating away
+async fn wait_for_network_idle(page: &Page, timeout: Duration) -> Result<()> {
+    // Wait a short initial period for the request to start
+    sleep(Duration::from_millis(500)).await;
+    
+    // Check if page is still loading by monitoring readyState
+    let start = std::time::Instant::now();
+    let mut stable_count = 0;
+    const STABLE_THRESHOLD: u32 = 3; // Require 3 consecutive checks showing ready state
+    
+    while start.elapsed() < timeout {
+        match page.evaluate("document.readyState").await {
+            Ok(result) => {
+                if let Some(value) = result.value() {
+                    if let Some(state) = value.as_str() {
+                        if state == "complete" {
+                            stable_count += 1;
+                            if stable_count >= STABLE_THRESHOLD {
+                                debug!("Network appears idle (readyState stable)");
+                                return Ok(());
+                            }
+                        } else {
+                            stable_count = 0; // Reset if not complete
+                        }
+                    }
+                }
+            }
+            Err(_) => {}
+        }
+        sleep(Duration::from_millis(200)).await;
+    }
+    
+    debug!("Network idle check completed (timeout or stable)");
+    Ok(())
+}
+
 async fn generate_watchlist_export(page: &Page) -> Result<bool> {
     // Returns Ok(true) if export was generated, Ok(false) if list is empty
     info!("Generating IMDB watchlist export");
     page.goto("https://www.imdb.com/list/watchlist").await?;
-    sleep(Duration::from_secs(2)).await;
+    
+    // Wait for page to fully load before looking for elements
+    wait_for_page_load(page).await?;
+    sleep(Duration::from_secs(1)).await; // Additional buffer
 
     // Check if watchlist is empty
     if is_watchlist_empty(page).await? {
@@ -122,7 +189,11 @@ async fn generate_watchlist_export(page: &Page) -> Result<bool> {
     // Try to click export button
     match click_export_button(page).await {
         Ok(_) => {
-            sleep(Duration::from_secs(3)).await;
+            // Wait for network idle to ensure export request was sent
+            if let Err(e) = wait_for_network_idle(page, Duration::from_secs(5)).await {
+                warn!("Failed to wait for network idle after clicking watchlist export: {}", e);
+            }
+            sleep(Duration::from_secs(2)).await; // Additional buffer
             Ok(true)
         }
         Err(e) => {
@@ -136,13 +207,20 @@ async fn generate_watchlist_export(page: &Page) -> Result<bool> {
 async fn generate_ratings_export(page: &Page) -> Result<()> {
     info!("Generating IMDB ratings export");
     page.goto("https://www.imdb.com/list/ratings").await?;
-    sleep(Duration::from_secs(2)).await;
+    
+    // Wait for page to fully load before looking for elements
+    wait_for_page_load(page).await?;
+    sleep(Duration::from_secs(1)).await; // Additional buffer
 
     // Click export button
     match click_export_button(page).await {
         Ok(_) => {
             info!("Successfully clicked ratings export button");
-            sleep(Duration::from_secs(3)).await;
+            // Wait for network idle to ensure export request was sent
+            if let Err(e) = wait_for_network_idle(page, Duration::from_secs(5)).await {
+                warn!("Failed to wait for network idle after clicking ratings export: {}", e);
+            }
+            sleep(Duration::from_secs(2)).await; // Additional buffer
         }
         Err(e) => {
             warn!("Export button not found or click failed (list may be empty): {}", e);
@@ -156,19 +234,26 @@ async fn generate_ratings_export(page: &Page) -> Result<()> {
 async fn generate_checkins_export(page: &Page) -> Result<()> {
     info!("Generating IMDB check-ins export");
     page.goto("https://www.imdb.com/list/checkins").await?;
-    sleep(Duration::from_secs(2)).await;
+    
+    // Wait for page to fully load before looking for elements
+    wait_for_page_load(page).await?;
+    sleep(Duration::from_secs(1)).await; // Additional buffer
 
     // Debug: Check if the page loaded correctly and log URL
     let current_url = page.url().await?.unwrap_or_default();
-    tracing::debug!("On check-ins page: {}", current_url.as_str());
+    debug!("On check-ins page: {}", current_url.as_str());
 
     // Click export button
     if let Err(e) = click_export_button(page).await {
         warn!("Export button not found or click failed for check-ins (list may be empty): {}", e);
-        tracing::debug!("Check-ins list may be empty or export button not available");
+        debug!("Check-ins list may be empty or export button not available");
     } else {
-        tracing::debug!("Successfully clicked check-ins export button");
-        sleep(Duration::from_secs(3)).await;
+        debug!("Successfully clicked check-ins export button");
+        // Wait for network idle to ensure export request was sent before navigating away
+        if let Err(e) = wait_for_network_idle(page, Duration::from_secs(5)).await {
+            warn!("Failed to wait for network idle after clicking check-ins export: {}", e);
+        }
+        sleep(Duration::from_secs(2)).await; // Additional buffer before navigating away
     }
 
     Ok(())
