@@ -369,7 +369,6 @@ impl ImdbClient {
             .arg("--disable-extensions")  // Disable extensions
             .arg("--disable-notifications")  // Disable notifications
             .arg("--disable-third-party-cookies")  // Privacy
-            .arg("--log-level=3")  // Reduce logging
             .arg("--disable-features=WebAuthentication")  // Disable WebAuthn/passkey to force password authentication
             .arg(format!("--download-directory={}", download_dir.display()))  // Set default download directory
             // Memory optimization flags
@@ -386,6 +385,37 @@ impl ImdbClient {
             .arg("--disable-sync")  // Disable Chrome sync
             .arg("--disable-default-apps")  // Disable default apps
             .arg("--window-size=800,600");  // Smaller viewport = less memory for rendering
+        
+        // Configure Chromium logging via environment variables
+        // CHROMIUM_ENABLE_LOGGING: Enable logging to stderr (default: false)
+        // CHROMIUM_LOG_LEVEL: Log level 0=INFO, 1=WARNING, 2=ERROR, 3=ERROR only (default: 3)
+        // CHROMIUM_VERBOSE: Verbose level 0-3 for --v flag (default: 0, disabled)
+        let enable_logging = std::env::var("CHROMIUM_ENABLE_LOGGING")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false);
+        
+        let log_level = std::env::var("CHROMIUM_LOG_LEVEL")
+            .ok()
+            .and_then(|v| v.parse::<u8>().ok())
+            .filter(|&level| level <= 3)
+            .unwrap_or(3);  // Default to 3 (ERROR only)
+        
+        let verbose_level = std::env::var("CHROMIUM_VERBOSE")
+            .ok()
+            .and_then(|v| v.parse::<u8>().ok())
+            .filter(|&level| level <= 3)
+            .unwrap_or(0);  // Default to 0 (disabled)
+        
+        if enable_logging {
+            builder = builder.arg("--enable-logging=stderr");
+            info!("Chromium logging enabled (log_level={}, verbose={})", log_level, verbose_level);
+        }
+        
+        builder = builder.arg(format!("--log-level={}", log_level));
+        
+        if verbose_level > 0 {
+            builder = builder.arg(format!("--v={}", verbose_level));
+        }
         
         // Platform-specific flags
         if is_docker {

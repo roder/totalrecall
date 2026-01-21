@@ -233,29 +233,39 @@ async fn generate_ratings_export(page: &Page) -> Result<()> {
 
 async fn generate_checkins_export(page: &Page) -> Result<()> {
     info!("Generating IMDB check-ins export");
+    
+    info!("Navigating to check-ins page...");
     page.goto("https://www.imdb.com/list/checkins").await?;
+    info!("Navigation to check-ins page completed");
     
     // Wait for page to fully load before looking for elements
+    info!("Waiting for check-ins page to load...");
     wait_for_page_load(page).await?;
+    info!("Check-ins page load completed");
     sleep(Duration::from_secs(1)).await; // Additional buffer
 
-    // Debug: Check if the page loaded correctly and log URL
+    // Check if the page loaded correctly and log URL
     let current_url = page.url().await?.unwrap_or_default();
-    debug!("On check-ins page: {}", current_url.as_str());
+    info!("On check-ins page: URL = {}", current_url.as_str());
 
     // Click export button
-    if let Err(e) = click_export_button(page).await {
-        warn!("Export button not found or click failed for check-ins (list may be empty): {}", e);
-        debug!("Check-ins list may be empty or export button not available");
-    } else {
-        debug!("Successfully clicked check-ins export button");
-        // Wait for network idle to ensure export request was sent before navigating away
-        if let Err(e) = wait_for_network_idle(page, Duration::from_secs(5)).await {
-            warn!("Failed to wait for network idle after clicking check-ins export: {}", e);
+    info!("Attempting to click check-ins export button...");
+    match click_export_button(page).await {
+        Ok(_) => {
+            info!("Successfully clicked check-ins export button - export request submitted to IMDB");
+            // Wait for network idle to ensure export request was sent before navigating away
+            if let Err(e) = wait_for_network_idle(page, Duration::from_secs(5)).await {
+                warn!("Failed to wait for network idle after clicking check-ins export: {}", e);
+            }
+            sleep(Duration::from_secs(2)).await; // Additional buffer before navigating away
         }
-        sleep(Duration::from_secs(2)).await; // Additional buffer before navigating away
+        Err(e) => {
+            warn!("IMDB check-ins export generation FAILED: Export button not found or click failed (list may be empty): {}", e);
+            // Don't return error - empty list is valid, but log clearly
+        }
     }
 
+    info!("Check-ins export generation function completed");
     Ok(())
 }
 
