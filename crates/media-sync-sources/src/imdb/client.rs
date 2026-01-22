@@ -407,8 +407,16 @@ impl ImdbClient {
             .unwrap_or(0);  // Default to 0 (disabled)
         
         if enable_logging {
+            // Enable logging to both stderr and a log file
             builder = builder.arg("--enable-logging=stderr");
-            info!("Chromium logging enabled (log_level={}, verbose={})", log_level, verbose_level);
+            
+            // Specify log file location in user data directory (not /tmp/chromiumoxide-runner/)
+            // This ensures logs go to /app/data/browser/chrome_debug.log in containers
+            let log_file = user_data_dir.join("chrome_debug.log");
+            builder = builder.arg(format!("--log-file={}", log_file.display()));
+            
+            info!("Chromium logging enabled (log_level={}, verbose={}, log_file={:?})", 
+                  log_level, verbose_level, log_file);
         }
         
         builder = builder.arg(format!("--log-level={}", log_level));

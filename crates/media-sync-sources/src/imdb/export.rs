@@ -233,15 +233,12 @@ async fn generate_ratings_export(page: &Page) -> Result<()> {
 
 async fn generate_checkins_export(page: &Page) -> Result<()> {
     info!("Generating IMDB check-ins export");
-    
     info!("Navigating to check-ins page...");
     page.goto("https://www.imdb.com/list/checkins").await?;
-    info!("Navigation to check-ins page completed");
     
     // Wait for page to fully load before looking for elements
     info!("Waiting for check-ins page to load...");
     wait_for_page_load(page).await?;
-    info!("Check-ins page load completed");
     sleep(Duration::from_secs(1)).await; // Additional buffer
 
     // Check if the page loaded correctly and log URL
@@ -261,6 +258,13 @@ async fn generate_checkins_export(page: &Page) -> Result<()> {
         }
         Err(e) => {
             warn!("IMDB check-ins export generation FAILED: Export button not found or click failed (list may be empty): {}", e);
+            // Log page content for debugging in container environments
+            if let Ok(page_text) = page.evaluate("document.body.innerText").await {
+                if let Some(text) = page_text.value().and_then(|v| v.as_str()) {
+                    let preview = if text.len() > 500 { &text[..500] } else { text };
+                    debug!("Page content preview: {}", preview);
+                }
+            }
             // Don't return error - empty list is valid, but log clearly
         }
     }
@@ -273,29 +277,60 @@ async fn click_export_button(page: &Page) -> Result<()> {
     // Wait for export button and click it (matching Python implementation)
     // Python: export_button = wait.until(EC.element_to_be_clickable(...))
     let selector = "div[data-testid*='hero-list-subnav-export-button'] button";
+    debug!("Looking for export button with selector: {}", selector);
     
     // Wait for element to be present and clickable
     let mut attempts = 0;
     let element = loop {
         match page.find_element(selector).await {
-            Ok(el) => break el,
-            Err(_) if attempts < 20 => {
+            Ok(el) => {
+                debug!("Found export button element after {} attempts", attempts);
+                break el;
+            }
+            Err(e) if attempts < 20 => {
+                if attempts % 5 == 0 {
+                    debug!("Export button not found yet, attempt {}/20: {}", attempts + 1, e);
+                }
                 sleep(Duration::from_millis(500)).await;
                 attempts += 1;
             }
-            Err(e) => return Err(anyhow::anyhow!("Export button not found: {}", e)),
+            Err(e) => {
+                warn!("Export button not found after 20 attempts (10 seconds). Last error: {}", e);
+                // Try alternative selectors as fallback
+                let alt_selectors = [
+                    "button[data-testid*='export']",
+                    ".ipc-button[data-testid*='export']",
+                ];
+                for alt_selector in &alt_selectors {
+                    debug!("Trying alternative selector: {}", alt_selector);
+                    if let Ok(el) = page.find_element(*alt_selector).await {
+                        debug!("Found export button with alternative selector: {}", alt_selector);
+                        return click_element_with_retry(page, el, *alt_selector).await;
+                    }
+                }
+                return Err(anyhow::anyhow!("Export button not found with any selector: {}", e));
+            }
         }
     };
     
+    click_element_with_retry(page, element, selector).await
+}
+
+async fn click_element_with_retry(page: &Page, element: chromiumoxide::Element, selector: &str) -> Result<()> {
     // Scroll into view (matching Python: driver.execute_script("arguments[0].scrollIntoView(true);", export_button))
-    element.scroll_into_view().await?;
+    debug!("Scrolling export button into view...");
+    if let Err(e) = element.scroll_into_view().await {
+        warn!("Failed to scroll element into view: {}", e);
+    }
     
     // Wait for visibility (matching Python: wait.until(EC.visibility_of(export_button)))
     // Check if element is visible by checking its bounding box
+    debug!("Waiting for export button to be visible...");
     let mut visibility_attempts = 0;
     while visibility_attempts < 20 {
         if let Ok(bbox) = element.bounding_box().await {
             if bbox.width > 0.0 && bbox.height > 0.0 {
+                debug!("Export button is visible (width: {}, height: {})", bbox.width, bbox.height);
                 break; // Element is visible
             }
         }
@@ -303,12 +338,57 @@ async fn click_export_button(page: &Page) -> Result<()> {
         visibility_attempts += 1;
     }
     
+    if visibility_attempts >= 20 {
+        warn!("Export button visibility check timed out after 20 attempts");
+    }
+    
     sleep(Duration::from_secs(1)).await;
     
-    // Click (matching Python: driver.execute_script("arguments[0].click();", export_button))
-    element.click().await?;
-    
-    Ok(())
+    // Try regular click first
+    debug!("Attempting to click export button...");
+    match element.click().await {
+        Ok(_) => {
+            debug!("Successfully clicked export button using regular click");
+            Ok(())
+        }
+        Err(e) => {
+            warn!("Regular click failed: {}. Trying JavaScript click as fallback...", e);
+            // Fallback to JavaScript click - more reliable in headless/container environments
+            // Use querySelector to find the button and click it via JavaScript
+            // Escape the selector for use in JavaScript string
+            let escaped_selector = selector.replace('"', "\\\"").replace('\'', "\\'");
+            let js_click = format!(
+                r#"
+                (() => {{
+                    const selector = "{}";
+                    const button = document.querySelector(selector);
+                    if (button) {{
+                        button.scrollIntoView({{ behavior: 'instant', block: 'center' }});
+                        button.click();
+                        return true;
+                    }}
+                    return false;
+                }})()
+            "#,
+                escaped_selector
+            );
+            match page.evaluate(js_click).await {
+                Ok(result) => {
+                    if let Some(clicked) = result.value().and_then(|v| v.as_bool()) {
+                        if clicked {
+                            debug!("Successfully clicked export button using JavaScript click");
+                            Ok(())
+                        } else {
+                            Err(anyhow::anyhow!("JavaScript click: button not found in DOM"))
+                        }
+                    } else {
+                        Err(anyhow::anyhow!("JavaScript click: unexpected return value"))
+                    }
+                }
+                Err(js_err) => Err(anyhow::anyhow!("JavaScript click failed: {}", js_err)),
+            }
+        }
+    }
 }
 
 async fn wait_for_exports_ready(page: &Page) -> Result<()> {
