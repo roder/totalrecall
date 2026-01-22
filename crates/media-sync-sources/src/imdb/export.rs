@@ -1,8 +1,9 @@
 use anyhow::Result;
 use chromiumoxide::{Browser, Page};
+use chromiumoxide::cdp::browser_protocol::page::NavigateParams;
 use std::time::Duration;
-use tokio::time::sleep;
-use tracing::{info, warn, debug};
+use tokio::time::{sleep, timeout};
+use tracing::{info, warn, debug, error};
 
 /// Generate IMDB CSV exports for watchlist, ratings, and check-ins
 /// Returns when all exports are ready (or timeout)
@@ -192,10 +193,106 @@ async fn wait_for_network_idle(page: &Page, timeout: Duration) -> Result<()> {
     Ok(())
 }
 
+/// Navigate to a URL with timeout and diagnostics
+/// This helps diagnose hanging navigation issues, especially on amd64 servers
+/// 
+/// Note: chromiumoxide's page.goto() doesn't support waitUntil options directly.
+/// The Chrome DevTools Protocol NavigateParams doesn't have a waitUntil field.
+/// We use a timeout wrapper to prevent indefinite hangs, and manually wait for
+/// DOMContentLoaded (readyState "interactive") instead of full load event.
+async fn navigate_with_timeout(page: &Page, url: &str, timeout_secs: u64) -> Result<()> {
+    let timeout_duration = Duration::from_secs(timeout_secs);
+    info!("Navigating to {} (timeout: {}s)...", url, timeout_secs);
+    
+    let start = std::time::Instant::now();
+    
+    // Use NavigateParams explicitly - this gives us more control
+    // NavigateParams doesn't have waitUntil, but we can control the navigation
+    let nav_params = NavigateParams {
+        url: url.to_string(),
+        referrer: None,
+        referrer_policy: None,
+        transition_type: None,
+        frame_id: None,
+    };
+    
+    // Execute navigation with timeout
+    match timeout(timeout_duration, page.goto(nav_params)).await {
+        Ok(Ok(_)) => {
+            let elapsed = start.elapsed();
+            info!("Navigation to {} completed in {:.2}s", url, elapsed.as_secs_f64());
+            
+            // Wait for DOMContentLoaded instead of full load event
+            // This is a workaround since NavigateParams doesn't support waitUntil
+            // We manually wait for DOMContentLoaded (readyState "interactive") with a shorter timeout
+            debug!("Waiting for DOMContentLoaded event (readyState: interactive)...");
+            let dom_timeout = Duration::from_secs(10);
+            let dom_start = std::time::Instant::now();
+            let mut ready_state_reached = false;
+            
+            while dom_start.elapsed() < dom_timeout {
+                if let Ok(ready_state_result) = page.evaluate("document.readyState").await {
+                    if let Some(state) = ready_state_result.value().and_then(|v| v.as_str()) {
+                        if state == "interactive" || state == "complete" {
+                            let dom_elapsed = dom_start.elapsed();
+                            debug!("DOMContentLoaded reached (readyState: {}) in {:.2}s", state, dom_elapsed.as_secs_f64());
+                            ready_state_reached = true;
+                            break;
+                        }
+                    }
+                }
+                sleep(Duration::from_millis(100)).await;
+            }
+            
+            if !ready_state_reached {
+                warn!("DOMContentLoaded wait timed out after 10s, but navigation completed");
+                // Check what state we're in
+                if let Ok(ready_state_result) = page.evaluate("document.readyState").await {
+                    if let Some(state) = ready_state_result.value().and_then(|v| v.as_str()) {
+                        warn!("Current readyState: {}", state);
+                    }
+                }
+            }
+            
+            Ok(())
+        }
+        Ok(Err(e)) => {
+            let elapsed = start.elapsed();
+            error!("Navigation to {} failed after {:.2}s: {}", url, elapsed.as_secs_f64(), e);
+            Err(anyhow::anyhow!("Navigation failed: {}", e))
+        }
+        Err(_) => {
+            let elapsed = start.elapsed();
+            error!("Navigation to {} timed out after {}s (elapsed: {:.2}s)", url, timeout_secs, elapsed.as_secs_f64());
+            
+            // Try to get current URL for diagnostics
+            if let Ok(Some(current_url)) = page.url().await {
+                warn!("Current page URL after timeout: {}", current_url.as_str());
+            }
+            
+            // Log page state for diagnostics
+            if let Ok(ready_state) = page.evaluate("document.readyState").await {
+                if let Some(state) = ready_state.value().and_then(|v| v.as_str()) {
+                    warn!("Page readyState after timeout: {}", state);
+                }
+            }
+            
+            // Try to get page title for diagnostics
+            if let Ok(title_result) = page.evaluate("document.title").await {
+                if let Some(title) = title_result.value().and_then(|v| v.as_str()) {
+                    warn!("Page title after timeout: {}", title);
+                }
+            }
+            
+            Err(anyhow::anyhow!("Navigation to {} timed out after {}s", url, timeout_secs))
+        }
+    }
+}
+
 async fn generate_watchlist_export(page: &Page) -> Result<bool> {
     // Returns Ok(true) if export was generated, Ok(false) if list is empty
     info!("Generating IMDB watchlist export");
-    page.goto("https://www.imdb.com/list/watchlist").await?;
+    navigate_with_timeout(page, "https://www.imdb.com/list/watchlist", 60).await?;
     
     // Wait for page to fully load before looking for elements
     wait_for_page_load(page).await?;
@@ -227,7 +324,7 @@ async fn generate_watchlist_export(page: &Page) -> Result<bool> {
 
 async fn generate_ratings_export(page: &Page) -> Result<()> {
     info!("Generating IMDB ratings export");
-    page.goto("https://www.imdb.com/list/ratings").await?;
+    navigate_with_timeout(page, "https://www.imdb.com/list/ratings", 60).await?;
     
     // Wait for page to fully load before looking for elements
     wait_for_page_load(page).await?;
@@ -255,7 +352,7 @@ async fn generate_ratings_export(page: &Page) -> Result<()> {
 async fn generate_checkins_export(page: &Page) -> Result<()> {
     info!("Generating IMDB check-ins export");
     info!("Navigating to check-ins page...");
-    page.goto("https://www.imdb.com/list/checkins").await?;
+    navigate_with_timeout(page, "https://www.imdb.com/list/checkins", 60).await?;
     
     // Wait for page to fully load before looking for elements
     info!("Waiting for check-ins page to load...");
@@ -419,7 +516,7 @@ async fn wait_for_exports_ready(page: &Page) -> Result<()> {
 
     loop {
         // Load exports page (matching Python: EH.get_page_with_retries('https://www.imdb.com/exports/', driver, wait))
-        page.goto("https://www.imdb.com/exports/").await?;
+        navigate_with_timeout(page, "https://www.imdb.com/exports/", 60).await?;
         sleep(Duration::from_secs(2)).await;
 
         // Locate all elements with the selector (matching Python: summary_items = wait.until(EC.presence_of_all_elements_located(...)))
