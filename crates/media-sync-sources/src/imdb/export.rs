@@ -133,7 +133,7 @@ async fn is_watchlist_empty(page: &Page) -> Result<bool> {
 
 /// Wait for page to be fully loaded by checking document.readyState
 async fn wait_for_page_load(page: &Page) -> Result<()> {
-    const PAGE_LOAD_TIMEOUT: Duration = Duration::from_secs(30);
+    const PAGE_LOAD_TIMEOUT: Duration = Duration::from_secs(60);
     let ready_script = "document.readyState === 'complete'";
     
     let start = std::time::Instant::now();
@@ -352,7 +352,8 @@ async fn generate_ratings_export(page: &Page) -> Result<()> {
 async fn generate_checkins_export(page: &Page) -> Result<()> {
     info!("Generating IMDB check-ins export");
     info!("Navigating to check-ins page...");
-    navigate_with_timeout(page, "https://www.imdb.com/list/checkins", 60).await?;
+    // Use longer timeout for check-ins page as it can be slow to load
+    navigate_with_timeout(page, "https://www.imdb.com/list/checkins", 90).await?;
     
     // Wait for page to fully load before looking for elements
     info!("Waiting for check-ins page to load...");
