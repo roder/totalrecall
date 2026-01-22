@@ -14,39 +14,60 @@ pub async fn generate_exports(
     remove_watched_from_watchlists: bool,
     mark_rated_as_watched: bool,
 ) -> Result<()> {
-    let page = browser.new_page("https://www.imdb.com").await?;
-
-    // Ensure page is closed even on error
-    let result = async {
-        // Generate watchlist export if needed
-        if sync_watchlist || remove_watched_from_watchlists {
+    // Create separate pages for each export type to avoid conflicts with concurrent operations
+    // This prevents race conditions when get_reviews() or other methods are called concurrently
+    
+    // Generate watchlist export if needed
+    if sync_watchlist || remove_watched_from_watchlists {
+        let page = browser.new_page("https://www.imdb.com").await?;
+        let result = async {
             let _export_generated = generate_watchlist_export(&page).await?;
+            Ok::<(), anyhow::Error>(())
+        }.await;
+        if let Err(e) = page.close().await {
+            warn!("Failed to close watchlist export page: {}", e);
         }
-
-        // Generate ratings export if needed
-        if sync_ratings || mark_rated_as_watched {
-            generate_ratings_export(&page).await?;
-        }
-
-        // Generate check-ins export if needed
-        if sync_watch_history || remove_watched_from_watchlists || mark_rated_as_watched {
-            generate_checkins_export(&page).await?;
-            // Give check-ins export extra time to register before navigating to exports page
-            sleep(Duration::from_secs(2)).await;
-        }
-
-        // Wait for exports to be ready
-        wait_for_exports_ready(&page).await?;
-
-        Ok(())
-    }.await;
-
-    // Always close the page, even on error
-    if let Err(e) = page.close().await {
-        warn!("Failed to close page after generate_exports: {}", e);
+        result?;
     }
 
-    result
+    // Generate ratings export if needed
+    if sync_ratings || mark_rated_as_watched {
+        let page = browser.new_page("about:blank").await?;
+        let result = async {
+            generate_ratings_export(&page).await?;
+            Ok::<(), anyhow::Error>(())
+        }.await;
+        if let Err(e) = page.close().await {
+            warn!("Failed to close ratings export page: {}", e);
+        }
+        result?;
+    }
+
+    // Generate check-ins export if needed
+    if sync_watch_history || remove_watched_from_watchlists || mark_rated_as_watched {
+        let page = browser.new_page("about:blank").await?;
+        let result = async {
+            generate_checkins_export(&page).await?;
+            Ok::<(), anyhow::Error>(())
+        }.await;
+        if let Err(e) = page.close().await {
+            warn!("Failed to close check-ins export page: {}", e);
+        }
+        result?;
+    }
+
+    // Wait for exports to be ready using a dedicated page
+    let page = browser.new_page("about:blank").await?;
+    let result = async {
+        wait_for_exports_ready(&page).await?;
+        Ok::<(), anyhow::Error>(())
+    }.await;
+    if let Err(e) = page.close().await {
+        warn!("Failed to close exports ready check page: {}", e);
+    }
+    result?;
+
+    Ok(())
 }
 
 /// Check if watchlist is empty by looking for empty state indicators
