@@ -1,8 +1,7 @@
 use anyhow::Result;
 use chromiumoxide::{Browser, Page};
-use chromiumoxide::cdp::browser_protocol::page::NavigateParams;
 use std::time::Duration;
-use tokio::time::sleep;
+use tokio::time::{sleep, timeout};
 use tracing::{info, warn, debug, error};
 
 /// Generate IMDB CSV exports for watchlist, ratings, and check-ins
@@ -206,29 +205,26 @@ async fn navigate_with_timeout(page: &Page, url: &str, timeout_secs: u64) -> Res
     
     let start = std::time::Instant::now();
     
-    // Use NavigateParams explicitly - this gives us more control
-    // NavigateParams doesn't have waitUntil, but we can control the navigation
-    // Use page.execute() instead of page.goto() to bypass the 30s internal timeout
-    let nav_params = NavigateParams {
-        url: url.to_string(),
-        referrer: None,
-        referrer_policy: None,
-        transition_type: None,
-        frame_id: None,
-    };
-    
-    // Execute navigation command - fire and forget to avoid 30s internal timeout
-    // The navigation is asynchronous, so we don't need to wait for page.execute() to complete
-    // chromiumoxide's page.execute() has a 30s internal CDP timeout that we bypass by not waiting
+    // Execute navigation command - start it with a short timeout, then poll readyState
+    // This avoids the 30s internal timeout by not waiting for goto() to complete
     info!("Sending navigation command to CDP...");
     
-    // Fire the navigation command in background - don't wait for it to complete
-    // It has a 30s internal timeout, but we'll detect navigation success by polling readyState instead
-    let nav_future = page.execute(nav_params);
-    tokio::spawn(async move {
-        let _ = nav_future.await;
-        // Ignore result - we detect navigation success by polling readyState
-    });
+    // Start navigation with a very short timeout (1s) just to initiate it
+    // Then we'll poll readyState with the full timeout instead
+    let nav_started = timeout(Duration::from_secs(1), page.goto(url)).await;
+    match nav_started {
+        Ok(Ok(_)) => {
+            debug!("Navigation command completed quickly");
+        }
+        Ok(Err(e)) => {
+            warn!("Navigation command returned error (but navigation may have started): {}", e);
+        }
+        Err(_) => {
+            // Timeout after 1s - navigation command may still be processing
+            // This is expected - we'll detect success by polling readyState
+            debug!("Navigation command timeout (expected) - will detect via readyState polling");
+        }
+    }
     
     // Immediately start polling for page load - don't wait for execute() to complete
     info!("Navigation command sent, waiting for page to load...");
