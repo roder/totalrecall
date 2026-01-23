@@ -2,7 +2,7 @@ use anyhow::Result;
 use chromiumoxide::{Browser, Page};
 use chromiumoxide::cdp::browser_protocol::page::NavigateParams;
 use std::time::Duration;
-use tokio::time::{sleep, timeout};
+use tokio::time::sleep;
 use tracing::{info, warn, debug, error};
 
 /// Generate IMDB CSV exports for watchlist, ratings, and check-ins
@@ -217,159 +217,143 @@ async fn navigate_with_timeout(page: &Page, url: &str, timeout_secs: u64) -> Res
         frame_id: None,
     };
     
-    // Execute navigation command directly (bypasses page.goto()'s 30s timeout)
+    // Execute navigation command - fire and forget to avoid 30s internal timeout
+    // The navigation is asynchronous, so we don't need to wait for page.execute() to complete
+    // chromiumoxide's page.execute() has a 30s internal CDP timeout that we bypass by not waiting
     info!("Sending navigation command to CDP...");
-    let nav_result = match timeout(timeout_duration, page.execute(nav_params)).await {
-        Ok(Ok(response)) => {
-            // Check if navigation had an error
-            if let Some(error_text) = response.result.error_text {
-                let elapsed = start.elapsed();
-                error!("Navigation to {} failed after {:.2}s: {}", url, elapsed.as_secs_f64(), error_text);
-                return Err(anyhow::anyhow!("Navigation failed: {}", error_text));
-            }
-            Ok(())
-        }
-        Ok(Err(e)) => {
-            let elapsed = start.elapsed();
-            error!("Navigation to {} failed after {:.2}s: {}", url, elapsed.as_secs_f64(), e);
-            Err(anyhow::anyhow!("Navigation failed: {}", e))
-        }
-        Err(_) => {
-            let elapsed = start.elapsed();
-            error!("Navigation command to {} timed out after {}s (elapsed: {:.2}s)", url, timeout_secs, elapsed.as_secs_f64());
-            Err(anyhow::anyhow!("Navigation command timed out after {}s", timeout_secs))
-        }
+    
+    // Fire the navigation command in background - don't wait for it to complete
+    // It has a 30s internal timeout, but we'll detect navigation success by polling readyState instead
+    let nav_future = page.execute(nav_params);
+    tokio::spawn(async move {
+        let _ = nav_future.await;
+        // Ignore result - we detect navigation success by polling readyState
+    });
+    
+    // Immediately start polling for page load - don't wait for execute() to complete
+    info!("Navigation command sent, waiting for page to load...");
+    
+    // Determine expected page indicators based on URL (for redirect handling)
+    let expected_indicators = if url.contains("/list/ratings") {
+        vec!["ratings", "Your ratings"]
+    } else if url.contains("/list/watchlist") {
+        vec!["watchlist", "Your Watchlist"]
+    } else if url.contains("/list/checkins") {
+        vec!["checkins", "Your check-ins"]
+    } else {
+        vec!["imdb.com"]
     };
     
-    // Now wait for navigation to complete with our own timeout
-    match nav_result {
-        Ok(_) => {
-            info!("Navigation command sent, waiting for page to load...");
-            // Wait for navigation to complete by checking readyState directly
-            // This avoids any internal timeouts in wait_for_navigation()
-            // Note: IMDB redirects /list/* URLs to /user/* URLs, so we check readyState first
-            // and validate page content rather than exact URL matching
-            let remaining_timeout = timeout_duration.saturating_sub(start.elapsed());
-            let wait_start = std::time::Instant::now();
-            let mut ready_state_reached = false;
-            
-            // Determine expected page indicators based on URL (for redirect handling)
-            let expected_indicators = if url.contains("/list/ratings") {
-                vec!["ratings", "Your ratings"]
-            } else if url.contains("/list/watchlist") {
-                vec!["watchlist", "Your Watchlist"]
-            } else if url.contains("/list/checkins") {
-                vec!["checkins", "Your check-ins"]
-            } else {
-                vec!["imdb.com"]
-            };
-            
-            while wait_start.elapsed() < remaining_timeout {
-                // Check readyState first (recommendation #2: prioritize readyState)
-                if let Ok(ready_state_result) = page.evaluate("document.readyState").await {
-                    if let Some(state) = ready_state_result.value().and_then(|v| v.as_str()) {
-                        if state == "interactive" || state == "complete" {
-                            // Page is loaded, verify we're on the right page (recommendation #1: handle redirects)
-                            let mut page_matches = false;
-                            
-                            // Check URL contains expected path pattern (handles redirects)
-                            if let Ok(Some(current_url)) = page.url().await {
-                                let url_str = current_url.as_str();
-                                if expected_indicators.iter().any(|indicator| url_str.contains(indicator)) {
+    // Wait for navigation to complete by checking readyState directly
+    // This avoids any internal timeouts in wait_for_navigation()
+    // Note: IMDB redirects /list/* URLs to /user/* URLs, so we check readyState first
+    // and validate page content rather than exact URL matching
+    let wait_start = std::time::Instant::now();
+    let mut ready_state_reached = false;
+    
+    while wait_start.elapsed() < timeout_duration {
+        // Check readyState first (recommendation #2: prioritize readyState)
+        if let Ok(ready_state_result) = page.evaluate("document.readyState").await {
+            if let Some(state) = ready_state_result.value().and_then(|v| v.as_str()) {
+                if state == "interactive" || state == "complete" {
+                    // Page is loaded, verify we're on the right page (recommendation #1: handle redirects)
+                    let mut page_matches = false;
+                    
+                    // Check URL contains expected path pattern (handles redirects)
+                    if let Ok(Some(current_url)) = page.url().await {
+                        let url_str = current_url.as_str();
+                        if expected_indicators.iter().any(|indicator| url_str.contains(indicator)) {
+                            page_matches = true;
+                            debug!("Page URL matches expected pattern: {}", url_str);
+                        }
+                    }
+                    
+                    // Also check page title as backup validation
+                    if !page_matches {
+                        if let Ok(title_result) = page.evaluate("document.title").await {
+                            if let Some(title) = title_result.value().and_then(|v| v.as_str()) {
+                                if expected_indicators.iter().any(|indicator| title.contains(indicator)) {
                                     page_matches = true;
-                                    debug!("Page URL matches expected pattern: {}", url_str);
+                                    debug!("Page title matches expected pattern: {}", title);
                                 }
-                            }
-                            
-                            // Also check page title as backup validation
-                            if !page_matches {
-                                if let Ok(title_result) = page.evaluate("document.title").await {
-                                    if let Some(title) = title_result.value().and_then(|v| v.as_str()) {
-                                        if expected_indicators.iter().any(|indicator| title.contains(indicator)) {
-                                            page_matches = true;
-                                            debug!("Page title matches expected pattern: {}", title);
-                                        }
-                                    }
-                                }
-                            }
-                            
-                            // Accept if readyState is complete (page loaded) or if we match expected indicators
-                            if page_matches || state == "complete" {
-                                let elapsed = start.elapsed();
-                                info!("Navigation to {} completed in {:.2}s (readyState: {})", url, elapsed.as_secs_f64(), state);
-                                ready_state_reached = true;
-                                break;
                             }
                         }
                     }
+                    
+                    // Accept if readyState is complete (page loaded) or if we match expected indicators
+                    if page_matches || state == "complete" {
+                        let elapsed = start.elapsed();
+                        info!("Navigation to {} completed in {:.2}s (readyState: {})", url, elapsed.as_secs_f64(), state);
+                        ready_state_reached = true;
+                        break;
+                    }
                 }
-                sleep(Duration::from_millis(200)).await;
             }
-            
-            if ready_state_reached {
-                Ok(())
-            } else {
-                // Recommendation #4: Graceful timeout handling - check if page is actually usable
-                if let Ok(ready_state) = page.evaluate("document.readyState").await {
-                    if let Some(state) = ready_state.value().and_then(|v| v.as_str()) {
-                        if state == "complete" {
-                            // Page is complete, check if we're on the right page
-                            let mut on_correct_page = false;
-                            
-                            // Check URL pattern
-                            if let Ok(Some(current_url)) = page.url().await {
-                                let url_str = current_url.as_str();
-                                if expected_indicators.iter().any(|indicator| url_str.contains(indicator)) {
+        }
+        sleep(Duration::from_millis(200)).await;
+    }
+    
+    if ready_state_reached {
+        Ok(())
+    } else {
+        // Recommendation #4: Graceful timeout handling - check if page is actually usable
+        if let Ok(ready_state) = page.evaluate("document.readyState").await {
+            if let Some(state) = ready_state.value().and_then(|v| v.as_str()) {
+                if state == "complete" {
+                    // Page is complete, check if we're on the right page
+                    let mut on_correct_page = false;
+                    
+                    // Check URL pattern
+                    if let Ok(Some(current_url)) = page.url().await {
+                        let url_str = current_url.as_str();
+                        if expected_indicators.iter().any(|indicator| url_str.contains(indicator)) {
+                            on_correct_page = true;
+                        }
+                    }
+                    
+                    // Check page title as backup
+                    if !on_correct_page {
+                        if let Ok(title_result) = page.evaluate("document.title").await {
+                            if let Some(title) = title_result.value().and_then(|v| v.as_str()) {
+                                if expected_indicators.iter().any(|indicator| title.contains(indicator)) {
                                     on_correct_page = true;
                                 }
                             }
-                            
-                            // Check page title as backup
-                            if !on_correct_page {
-                                if let Ok(title_result) = page.evaluate("document.title").await {
-                                    if let Some(title) = title_result.value().and_then(|v| v.as_str()) {
-                                        if expected_indicators.iter().any(|indicator| title.contains(indicator)) {
-                                            on_correct_page = true;
-                                        }
-                                    }
-                                }
-                            }
-                            
-                            if on_correct_page {
-                                let elapsed = start.elapsed();
-                                warn!("Navigation timeout reached but page is complete and on correct page - continuing (elapsed: {:.2}s)", elapsed.as_secs_f64());
-                                return Ok(());
-                            }
                         }
                     }
-                }
-                
-                let elapsed = start.elapsed();
-                error!("Navigation to {} timed out after {}s (elapsed: {:.2}s)", url, timeout_secs, elapsed.as_secs_f64());
-                
-                // Try to get current URL for diagnostics
-                if let Ok(Some(current_url)) = page.url().await {
-                    warn!("Current page URL after timeout: {}", current_url.as_str());
-                }
-                
-                // Log page state for diagnostics
-                if let Ok(ready_state) = page.evaluate("document.readyState").await {
-                    if let Some(state) = ready_state.value().and_then(|v| v.as_str()) {
-                        warn!("Page readyState after timeout: {}", state);
+                    
+                    if on_correct_page {
+                        let elapsed = start.elapsed();
+                        warn!("Navigation timeout reached but page is complete and on correct page - continuing (elapsed: {:.2}s)", elapsed.as_secs_f64());
+                        return Ok(());
                     }
                 }
-                
-                // Try to get page title for diagnostics
-                if let Ok(title_result) = page.evaluate("document.title").await {
-                    if let Some(title) = title_result.value().and_then(|v| v.as_str()) {
-                        warn!("Page title after timeout: {}", title);
-                    }
-                }
-                
-                Err(anyhow::anyhow!("Navigation to {} timed out after {}s", url, timeout_secs))
             }
         }
-        Err(e) => Err(e)
+        
+        let elapsed = start.elapsed();
+        error!("Navigation to {} timed out after {}s (elapsed: {:.2}s)", url, timeout_secs, elapsed.as_secs_f64());
+        
+        // Try to get current URL for diagnostics
+        if let Ok(Some(current_url)) = page.url().await {
+            warn!("Current page URL after timeout: {}", current_url.as_str());
+        }
+        
+        // Log page state for diagnostics
+        if let Ok(ready_state) = page.evaluate("document.readyState").await {
+            if let Some(state) = ready_state.value().and_then(|v| v.as_str()) {
+                warn!("Page readyState after timeout: {}", state);
+            }
+        }
+        
+        // Try to get page title for diagnostics
+        if let Ok(title_result) = page.evaluate("document.title").await {
+            if let Some(title) = title_result.value().and_then(|v| v.as_str()) {
+                warn!("Page title after timeout: {}", title);
+            }
+        }
+        
+        Err(anyhow::anyhow!("Navigation to {} timed out after {}s", url, timeout_secs))
     }
 }
 
