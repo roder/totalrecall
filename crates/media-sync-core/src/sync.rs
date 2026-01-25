@@ -1415,8 +1415,18 @@ impl SyncOrchestrator {
         let removal_list = removal_lists.get(source_name).cloned().unwrap_or_default();
         
         // Prepare all data types using the distribution strategy
+        let remove_watched_from_watchlists = self.config_sync_options.as_ref()
+            .map(|opts| opts.remove_watched_from_watchlists)
+            .unwrap_or(false);
+        
         let mut watchlist_result = if self.sync_options.sync_watchlist {
-            strategy.prepare_watchlist(&resolved.watchlist, existing, self.sync_options.force_full_sync)
+            strategy.prepare_watchlist(
+                &resolved.watchlist,
+                existing,
+                self.sync_options.force_full_sync,
+                &resolved.watch_history,
+                remove_watched_from_watchlists,
+            )
                 .unwrap_or_else(|e| {
                     warn!("Failed to prepare watchlist for {}: {}", source_name, e);
                     DistributionResult::default()
@@ -1795,9 +1805,20 @@ impl SyncOrchestrator {
         // If an item is watched, it should be removed from the watchlist even if it originally came from that source
         let removal_list = removal_lists.get(source_name).cloned().unwrap_or_default();
         
+        // Get remove_watched_from_watchlists config
+        let remove_watched_from_watchlists = config_sync_options.as_ref()
+            .map(|opts| opts.remove_watched_from_watchlists)
+            .unwrap_or(false);
+        
         // Prepare all data types using the distribution strategy
         let mut watchlist_result = if sync_options.sync_watchlist {
-            strategy.prepare_watchlist(&resolved.watchlist, existing, sync_options.force_full_sync)
+            strategy.prepare_watchlist(
+                &resolved.watchlist,
+                existing,
+                sync_options.force_full_sync,
+                &resolved.watch_history,
+                remove_watched_from_watchlists,
+            )
                 .unwrap_or_else(|e| {
                     warn!("Failed to prepare watchlist for {}: {}", source_name, e);
                     DistributionResult::default()

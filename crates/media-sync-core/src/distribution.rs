@@ -38,11 +38,16 @@ pub trait DistributionStrategy: Send + Sync {
     /// Prepare watchlist items for distribution
     /// Returns: (items_for_watchlist, items_for_watch_history)
     /// Sources can split by status, transform, filter, etc.
+    /// 
+    /// `resolved_watch_history` contains all watch history from all sources (resolved).
+    /// If `remove_watched_from_watchlists` is true, items in `resolved_watch_history` should be filtered out.
     fn prepare_watchlist(
         &self,
         items: &[WatchlistItem],
         existing: &SourceData,
         force_full_sync: bool,
+        resolved_watch_history: &[WatchHistory],
+        remove_watched_from_watchlists: bool,
     ) -> Result<DistributionResult<WatchlistItem, WatchHistory>>;
     
     /// Prepare ratings for distribution
@@ -223,6 +228,8 @@ impl DistributionStrategy for DefaultDistributionStrategy {
         items: &[WatchlistItem],
         existing: &SourceData,
         force_full_sync: bool,
+        resolved_watch_history: &[WatchHistory],
+        remove_watched_from_watchlists: bool,
     ) -> Result<DistributionResult<WatchlistItem, WatchHistory>> {
         // 1. Apply incremental sync filtering
         let (mut filtered, excluded_timestamp) = self.apply_incremental_sync_filter(
@@ -281,7 +288,45 @@ impl DistributionStrategy for DefaultDistributionStrategy {
             info!("Deduplication filtered out {} watchlist items (already exist in target)", excluded_dedup_count);
         }
         
-        // 4. Return as-is (no status splitting)
+        // 4. Filter out watched items if remove_watched_from_watchlists is enabled
+        if remove_watched_from_watchlists {
+            use crate::diff::GetImdbId;
+            let watched_ids: std::collections::HashSet<String> = resolved_watch_history.iter()
+                .map(|h| h.get_imdb_id())
+                .filter(|id| !id.is_empty())
+                .collect();
+            
+            let before_watched_filter = filtered.len();
+            let mut excluded_watched: Vec<WatchlistItem> = Vec::new();
+            filtered.retain(|item| {
+                if watched_ids.contains(&item.imdb_id) {
+                    excluded_watched.push(item.clone());
+                    false
+                } else {
+                    true
+                }
+            });
+            
+            // Save watched-excluded items to cache
+            self.save_excluded_items(&excluded_watched, "watchlist", "watched filter", |item| {
+                ExcludedItem {
+                    title: Some(item.title.clone()),
+                    imdb_id: if item.imdb_id.is_empty() { None } else { Some(item.imdb_id.clone()) },
+                    rating_key: None,
+                    media_type: format!("{:?}", item.media_type),
+                    reason: format!("Excluded: item is already in watch history (remove_watched_from_watchlists)"),
+                    source: item.source.clone(),
+                    date_added: None,
+                }
+            });
+            
+            if before_watched_filter > filtered.len() {
+                info!("Filtered out {} watchlist items that are already watched (remove_watched_from_watchlists)", 
+                    before_watched_filter - filtered.len());
+            }
+        }
+        
+        // 5. Return as-is (no status splitting)
         Ok(DistributionResult {
             for_watchlist: filtered,
             for_watch_history: Vec::new(),
@@ -577,9 +622,11 @@ impl DistributionStrategy for TraktDistributionStrategy {
         items: &[WatchlistItem],
         existing: &SourceData,
         force_full_sync: bool,
+        resolved_watch_history: &[WatchHistory],
+        remove_watched_from_watchlists: bool,
     ) -> Result<DistributionResult<WatchlistItem, WatchHistory>> {
-        // 1. Apply base filtering (incremental sync + deduplication)
-        let base_result = self.base.prepare_watchlist(items, existing, force_full_sync)?;
+        // 1. Apply base filtering (incremental sync + deduplication + watched filter)
+        let base_result = self.base.prepare_watchlist(items, existing, force_full_sync, resolved_watch_history, remove_watched_from_watchlists)?;
         
         // 2. Split by status
         let (watchlist_items, watch_history_items) = Self::split_by_status(&base_result.for_watchlist);
@@ -687,9 +734,11 @@ impl DistributionStrategy for ImdbDistributionStrategy {
         items: &[WatchlistItem],
         existing: &SourceData,
         force_full_sync: bool,
+        resolved_watch_history: &[WatchHistory],
+        remove_watched_from_watchlists: bool,
     ) -> Result<DistributionResult<WatchlistItem, WatchHistory>> {
-        // 1. Apply base filtering (incremental sync + deduplication)
-        let base_result = self.base.prepare_watchlist(items, existing, force_full_sync)?;
+        // 1. Apply base filtering (incremental sync + deduplication + watched filter)
+        let base_result = self.base.prepare_watchlist(items, existing, force_full_sync, resolved_watch_history, remove_watched_from_watchlists)?;
         
         // 2. Transform Watching/Completed items to check-ins
         let checkins = Self::transform_to_checkins(&base_result.for_watchlist);
@@ -698,6 +747,7 @@ impl DistributionStrategy for ImdbDistributionStrategy {
         let filtered_checkins = filter_items_by_imdb_id(&checkins, &existing.watch_history);
         
         // 4. Filter watchlist items (remove those that became check-ins)
+        // Note: watched items are already filtered in base.prepare_watchlist if remove_watched_from_watchlists is enabled
         let watchlist_items: Vec<_> = base_result.for_watchlist.iter()
             .filter(|item| {
                 item.status.as_ref()
@@ -772,16 +822,36 @@ impl DistributionStrategy for SimklDistributionStrategy {
         items: &[WatchlistItem],
         existing: &SourceData,
         _force_full_sync: bool,
+        resolved_watch_history: &[WatchHistory],
+        remove_watched_from_watchlists: bool,
     ) -> Result<DistributionResult<WatchlistItem, WatchHistory>> {
         // 1. Filter out items that came from the target source (they already exist there)
         let target_source = self.target_source_name();
-        let filtered_by_source: Vec<_> = items.iter()
+        let mut filtered_by_source: Vec<_> = items.iter()
             .filter(|item| item.source != target_source)
             .cloned()
             .collect();
         
         // 2. Only deduplication, no incremental sync (Simkl handles it natively)
-        let deduped = filter_items_by_imdb_id(&filtered_by_source, &existing.watchlist);
+        let mut deduped = filter_items_by_imdb_id(&filtered_by_source, &existing.watchlist);
+        
+        // 3. Filter out watched items if remove_watched_from_watchlists is enabled
+        if remove_watched_from_watchlists {
+            use crate::diff::GetImdbId;
+            let watched_ids: std::collections::HashSet<String> = resolved_watch_history.iter()
+                .map(|h| h.get_imdb_id())
+                .filter(|id| !id.is_empty())
+                .collect();
+            
+            let before_watched_filter = deduped.len();
+            deduped.retain(|item| !watched_ids.contains(&item.imdb_id));
+            
+            if before_watched_filter > deduped.len() {
+                info!("Filtered out {} Simkl watchlist items that are already watched (remove_watched_from_watchlists)", 
+                    before_watched_filter - deduped.len());
+            }
+        }
+        
         Ok(DistributionResult {
             for_watchlist: deduped,
             for_watch_history: Vec::new(),
@@ -920,9 +990,11 @@ impl DistributionStrategy for PlexDistributionStrategy {
         items: &[WatchlistItem],
         existing: &SourceData,
         force_full_sync: bool,
+        resolved_watch_history: &[WatchHistory],
+        remove_watched_from_watchlists: bool,
     ) -> Result<DistributionResult<WatchlistItem, WatchHistory>> {
-        // 1. Apply base filtering (incremental sync + deduplication)
-        let base_result = self.base.prepare_watchlist(items, existing, force_full_sync)?;
+        // 1. Apply base filtering (incremental sync + deduplication + watched filter)
+        let base_result = self.base.prepare_watchlist(items, existing, force_full_sync, resolved_watch_history, remove_watched_from_watchlists)?;
         
         // 2. Split by status (only Watchlist → watchlist, Completed/Watching → watch_history)
         let (watchlist_items, watch_history_items) = Self::split_by_status(&base_result.for_watchlist);
